@@ -435,8 +435,7 @@ class MmdMaterial {
 
   bool get isTransparent => alpha < 0.98;
 
-  String? get displayTexturePath =>
-      texturePath ?? (sphereMode > 0 ? sphereTexturePath : null) ?? toonTexturePath;
+  String? get displayTexturePath => texturePath;
 
   Iterable<String> get allTexturePaths sync* {
     final primary = texturePath;
@@ -1053,6 +1052,21 @@ String _decodeUtf16Le(Uint8List bytes) {
   return String.fromCharCodes(codes);
 }
 
+
+class _MaterialDrawItem {
+  const _MaterialDrawItem({
+    required this.material,
+    required this.start,
+    required this.end,
+    required this.depth,
+  });
+
+  final MmdMaterial material;
+  final int start;
+  final int end;
+  final double depth;
+}
+
 class PmxMeshPainter extends CustomPainter {
   PmxMeshPainter({
     required this.mesh,
@@ -1111,6 +1125,7 @@ class PmxMeshPainter extends CustomPainter {
     final sx = math.sin(pitch);
 
     final projected = List<Offset>.filled(animated.length, Offset.zero);
+    final depths = List<double>.filled(animated.length, 0);
     for (var i = 0; i < animated.length; i++) {
       final v = animated[i];
       final x = v.x - centerX;
@@ -1120,21 +1135,60 @@ class PmxMeshPainter extends CustomPainter {
       final rx = x * cy + z * sy;
       final rz = -x * sy + z * cy;
       final ry = y * cx - rz * sx;
-
+      final rz2 = y * sx + rz * cx;
+      depths[i] = rz2;
       projected[i] = Offset(
         size.width * .5 + rx * scale,
         size.height * .56 - ry * scale,
       );
     }
 
+    final drawItems = <_MaterialDrawItem>[];
     for (final material in mesh.materials) {
       final start = material.indexStart.clamp(0, mesh.indices.length).toInt();
-      final end = (material.indexStart + material.indexCount).clamp(start, mesh.indices.length).toInt();
+      final end = (material.indexStart + material.indexCount)
+          .clamp(start, mesh.indices.length)
+          .toInt();
       if (end - start < 3) continue;
-
-      final image = material.displayTexturePath == null ? null : textures[material.displayTexturePath!];
-      _drawMaterial(canvas, projected, material, start, end, image);
+      drawItems.add(
+        _MaterialDrawItem(
+          material: material,
+          start: start,
+          end: end,
+          depth: _materialDepth(depths, start, end),
+        ),
+      );
     }
+
+    // Painter's algorithm: draw farther material batches first, nearer last.
+    drawItems.sort((a, b) => a.depth.compareTo(b.depth));
+
+    for (final item in drawItems) {
+      final texturePath = item.material.displayTexturePath;
+      final image = texturePath == null ? null : textures[texturePath];
+      _drawMaterial(canvas, projected, item.material, item.start, item.end, image);
+    }
+  }
+
+  double _materialDepth(List<double> depths, int start, int end) {
+    var sum = 0.0;
+    var count = 0;
+
+    // Sample triangles instead of scanning huge materials completely.
+    final span = end - start;
+    final step = math.max(3, (span ~/ 240) * 3);
+
+    for (var i = start; i + 2 < end; i += step) {
+      final a = mesh.indices[i];
+      final b = mesh.indices[i + 1];
+      final c = mesh.indices[i + 2];
+      if (a < depths.length && b < depths.length && c < depths.length) {
+        sum += (depths[a] + depths[b] + depths[c]) / 3.0;
+        count++;
+      }
+    }
+
+    return count == 0 ? 0.0 : sum / count;
   }
 
   void _drawMaterial(
