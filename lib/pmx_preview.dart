@@ -66,17 +66,17 @@ class _PmxPreviewState extends State<PmxPreview> {
     });
 
     try {
-      final payload = await _resolvePmxPayload(asset);
+      final payload = await _resolveModelPayload(asset);
       if (payload == null) {
-        throw Exception('No PMX file found. Re-import model as a ZIP that contains .pmx.');
+        throw Exception('No PMX or PMD file found. Re-import model as a ZIP that contains a supported model.');
       }
 
-      final parsed = PmxParser.parseBytes(payload.bytes);
+      final parsed = MmdMeshParser.parseBytes(payload.bytes);
       if (!mounted || loadingAssetId != asset.id) return;
 
       setState(() {
         mesh = parsed;
-        status = 'PMX loaded: ${parsed.vertices.length} vertices / ${parsed.indices.length ~/ 3} triangles';
+        status = '${parsed.format} loaded: ${parsed.vertices.length} vertices / ${parsed.indices.length ~/ 3} triangles';
         statusIsError = false;
       });
     } catch (error) {
@@ -89,7 +89,7 @@ class _PmxPreviewState extends State<PmxPreview> {
     }
   }
 
-  Future<_PmxPayload?> _resolvePmxPayload(KioAsset asset) async {
+  Future<_PmxPayload?> _resolveModelPayload(KioAsset asset) async {
     final asDir = Directory(asset.localPath);
     final asFile = File(asset.localPath);
 
@@ -97,7 +97,7 @@ class _PmxPreviewState extends State<PmxPreview> {
       final entry = asset.entryFile;
       if (entry != null && entry.trim().isNotEmpty) {
         final direct = File(p.join(asDir.path, entry));
-        if (direct.existsSync() && direct.path.toLowerCase().endsWith('.pmx')) {
+        if (direct.existsSync() && _isSupportedModelPath(direct.path)) {
           return _PmxPayload(direct.path, await direct.readAsBytes());
         }
       }
@@ -105,29 +105,29 @@ class _PmxPreviewState extends State<PmxPreview> {
       final files = asDir
           .listSync(recursive: true, followLinks: false)
           .whereType<File>()
-          .where((file) => file.path.toLowerCase().endsWith('.pmx'))
+          .where((file) => _isSupportedModelPath(file.path))
           .toList();
 
       if (files.isEmpty) return null;
-      files.sort((a, b) => a.path.length.compareTo(b.path.length));
+      files.sort(_compareModelFiles);
       return _PmxPayload(files.first.path, await files.first.readAsBytes());
     }
 
     if (asFile.existsSync()) {
       final lower = asFile.path.toLowerCase();
-      if (lower.endsWith('.pmx')) {
+      if (_isSupportedModelPath(lower)) {
         return _PmxPayload(asFile.path, await asFile.readAsBytes());
       }
 
       if (lower.endsWith('.zip')) {
-        return _readPmxFromZip(await asFile.readAsBytes(), asFile.path);
+        return _readModelFromZip(await asFile.readAsBytes(), asFile.path);
       }
     }
 
     return null;
   }
 
-  _PmxPayload? _readPmxFromZip(Uint8List bytes, String sourceName) {
+  _PmxPayload? _readModelFromZip(Uint8List bytes, String sourceName) {
     late final Archive archive;
     try {
       archive = ZipDecoder().decodeBytes(bytes, verify: true);
@@ -135,19 +135,40 @@ class _PmxPreviewState extends State<PmxPreview> {
       throw Exception('Invalid model ZIP.');
     }
 
-    final pmxEntries = archive.files
-        .where((entry) => entry.isFile && entry.name.toLowerCase().endsWith('.pmx'))
+    final modelEntries = archive.files
+        .where((entry) => entry.isFile && _isSupportedModelPath(entry.name))
         .toList();
 
-    if (pmxEntries.isEmpty) return null;
-    pmxEntries.sort((a, b) => a.name.length.compareTo(b.name.length));
+    if (modelEntries.isEmpty) return null;
+    modelEntries.sort(_compareModelEntries);
 
-    final content = pmxEntries.first.content;
+    final content = modelEntries.first.content;
     if (content is! List<int>) {
-      throw Exception('Cannot read PMX data from ZIP.');
+      throw Exception('Cannot read model data from ZIP.');
     }
 
-    return _PmxPayload('$sourceName/${pmxEntries.first.name}', Uint8List.fromList(content));
+    return _PmxPayload('$sourceName/${modelEntries.first.name}', Uint8List.fromList(content));
+  }
+
+  bool _isSupportedModelPath(String path) {
+    final lower = path.toLowerCase();
+    return lower.endsWith('.pmx') || lower.endsWith('.pmd');
+  }
+
+  int _compareModelFiles(File a, File b) {
+    final priority = _modelPriority(a.path).compareTo(_modelPriority(b.path));
+    if (priority != 0) return priority;
+    return a.path.length.compareTo(b.path.length);
+  }
+
+  int _compareModelEntries(ArchiveFile a, ArchiveFile b) {
+    final priority = _modelPriority(a.name).compareTo(_modelPriority(b.name));
+    if (priority != 0) return priority;
+    return a.name.length.compareTo(b.name.length);
+  }
+
+  int _modelPriority(String path) {
+    return path.toLowerCase().endsWith('.pmx') ? 0 : 1;
   }
 
   @override
@@ -206,6 +227,7 @@ class _PmxPayload {
 
 class PmxMesh {
   PmxMesh({
+    required this.format,
     required this.vertices,
     required this.indices,
     required this.minX,
@@ -216,6 +238,7 @@ class PmxMesh {
     required this.maxZ,
   });
 
+  final String format;
   final List<_Vec3> vertices;
   final List<int> indices;
   final double minX;
@@ -233,6 +256,23 @@ class _Vec3 {
   final double z;
 }
 
+
+class MmdMeshParser {
+  static PmxMesh parseBytes(Uint8List bytes) {
+    if (_hasMagic(bytes, 'PMX ')) {
+      return PmxParser.parseBytes(bytes);
+    }
+    if (_hasMagic(bytes, 'Pmd')) {
+      return PmdParser.parseBytes(bytes);
+    }
+    throw Exception('Unsupported model format. Expected PMX or PMD.');
+  }
+
+  static bool _hasMagic(Uint8List bytes, String magic) {
+    if (bytes.length < magic.length) return false;
+    return String.fromCharCodes(bytes.sublist(0, magic.length)) == magic;
+  }
+}
 
 class PmxParser {
   static PmxMesh parseBytes(Uint8List bytes) {
@@ -340,6 +380,82 @@ class PmxParser {
     }
 
     return PmxMesh(
+      format: 'PMX',
+      vertices: vertices,
+      indices: indices,
+      minX: minX,
+      maxX: maxX,
+      minY: minY,
+      maxY: maxY,
+      minZ: minZ,
+      maxZ: maxZ,
+    );
+  }
+}
+
+class PmdParser {
+  static PmxMesh parseBytes(Uint8List bytes) {
+    final r = _Reader(bytes);
+
+    final magic = String.fromCharCodes(r.readBytes(3));
+    if (magic != 'Pmd') {
+      throw Exception('Invalid PMD header: $magic');
+    }
+
+    r.readFloat32();
+    r.skip(20);
+    r.skip(256);
+
+    final vertexCount = r.readInt32();
+    if (vertexCount <= 0 || vertexCount > 1000000) {
+      throw Exception('Invalid PMD vertex count: $vertexCount');
+    }
+
+    final vertices = <_Vec3>[];
+    double minX = double.infinity;
+    double minY = double.infinity;
+    double minZ = double.infinity;
+    double maxX = -double.infinity;
+    double maxY = -double.infinity;
+    double maxZ = -double.infinity;
+
+    for (var i = 0; i < vertexCount; i++) {
+      final x = r.readFloat32();
+      final y = r.readFloat32();
+      final z = r.readFloat32();
+
+      vertices.add(_Vec3(x, y, z));
+      minX = math.min(minX, x);
+      minY = math.min(minY, y);
+      minZ = math.min(minZ, z);
+      maxX = math.max(maxX, x);
+      maxY = math.max(maxY, y);
+      maxZ = math.max(maxZ, z);
+
+      r.skipFloat32(3);
+      r.skipFloat32(2);
+      r.skip(6);
+    }
+
+    final indexCount = r.readInt32();
+    if (indexCount <= 0 || indexCount > 5000000) {
+      throw Exception('Invalid PMD index count: $indexCount');
+    }
+
+    final indices = <int>[];
+    for (var i = 0; i < indexCount; i++) {
+      final index = r.readUint16();
+      if (index < vertices.length) {
+        indices.add(index);
+      }
+    }
+
+    if (indices.length < 3) {
+      throw Exception('PMD has no drawable indices.');
+    }
+
+    return PmxMesh(
+      format: 'PMD',
       vertices: vertices,
       indices: indices,
       minX: minX,
@@ -369,6 +485,13 @@ class _Reader {
     _check(4);
     final v = data.getInt32(offset, Endian.little);
     offset += 4;
+    return v;
+  }
+
+  int readUint16() {
+    _check(2);
+    final v = data.getUint16(offset, Endian.little);
+    offset += 2;
     return v;
   }
 

@@ -238,6 +238,11 @@ class KioStore extends ChangeNotifier {
       final n = e.name.toLowerCase();
       return n.endsWith('.pmx') || n.endsWith('.pmd');
     }).toList();
+    modelFiles.sort((a, b) {
+      final priority = _modelPriority(a.name).compareTo(_modelPriority(b.name));
+      if (priority != 0) return priority;
+      return a.name.length.compareTo(b.name.length);
+    });
 
     if (modelFiles.isEmpty) {
       throw AssetImportException('Model ZIP must contain at least one PMX or PMD file.');
@@ -307,5 +312,9 @@ class KioStore extends ChangeNotifier {
     final parts = normalized.split('/').map(_safeFileName).where((e) => e.isNotEmpty).toList();
     if (parts.isEmpty) return null;
     return parts.join('/');
+  }
+
+  int _modelPriority(String path) {
+    return path.toLowerCase().endsWith('.pmx') ? 0 : 1;
   }
 }

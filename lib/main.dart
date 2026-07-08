@@ -136,6 +136,7 @@ class _KioWorkspaceState extends State<KioWorkspace> {
             onCreateProject: () => unawaited(store.createProject()),
             onSelectProject: (id) => unawaited(store.selectProject(id)),
             onImportAsset: _importAsset,
+            onApplyAsset: _applyAsset,
             onRenameAsset: _renameAsset,
           ),
           if (store.isBusy) const Positioned.fill(child: ColoredBox(color: Color(0x99000000), child: Center(child: CircularProgressIndicator(strokeWidth: 2)))),
@@ -167,10 +168,19 @@ class _KioWorkspaceState extends State<KioWorkspace> {
       context: context,
       builder: (_) => _AssetPickerDialog(type: type, assets: assets),
     );
+    if (!mounted) return;
+    setState(() => importOpen = false);
     if (picked != null) {
       await store.attachAssetToSelectedProject(picked);
-      _toast('${picked.displayName} applied.');
+      _toast('${picked.displayName} applied to ${store.selectedProject.name}.');
     }
+  }
+
+  Future<void> _applyAsset(KioAsset asset) async {
+    await store.attachAssetToSelectedProject(asset);
+    if (!mounted) return;
+    setState(() => drawerOpen = false);
+    _toast('${asset.displayName} applied to ${store.selectedProject.name}.');
   }
 
   Future<void> _renameAsset(KioAsset asset) async {
@@ -293,6 +303,9 @@ class _PlayerCanvasState extends State<_PlayerCanvas> {
   Widget build(BuildContext context) {
     final s = widget.project.settings;
     final model = widget.store.assetById(s.modelAssetId);
+    final motion = widget.store.assetById(s.motionAssetId);
+    final music = widget.store.assetById(s.musicAssetId);
+    final camera = widget.store.assetById(s.cameraAssetId);
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -306,6 +319,12 @@ class _PlayerCanvasState extends State<_PlayerCanvas> {
         fit: StackFit.expand,
         children: [
           CustomPaint(painter: _StagePainter(orbitX: s.orbitX, orbitY: s.orbitY, zoom: s.zoom)),
+          PmxPreview(asset: model, orbitX: s.orbitX, orbitY: s.orbitY, zoom: s.zoom),
+          Positioned(
+            left: 8,
+            bottom: MediaQuery.of(context).padding.bottom + 96,
+            child: _SelectionSummary(model: model, motion: motion, music: music, camera: camera),
+          ),
         ],
       ),
     );
@@ -535,6 +554,7 @@ class _SidePanel extends StatelessWidget {
     required this.onCreateProject,
     required this.onSelectProject,
     required this.onImportAsset,
+    required this.onApplyAsset,
     required this.onRenameAsset,
   });
 
@@ -548,10 +568,12 @@ class _SidePanel extends StatelessWidget {
   final VoidCallback onCreateProject;
   final ValueChanged<String> onSelectProject;
   final ValueChanged<KioAssetType> onImportAsset;
+  final ValueChanged<KioAsset> onApplyAsset;
   final ValueChanged<KioAsset> onRenameAsset;
 
   @override
   Widget build(BuildContext context) {
+    final settings = store.selectedProject.settings;
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
@@ -592,7 +614,12 @@ class _SidePanel extends StatelessWidget {
                       const SizedBox(height: 8),
                       if (store.state.assets.isEmpty) const _EmptyHint('No imported assets.'),
                       for (final asset in store.state.assets)
-                        _AssetTile(asset: asset, onLongPress: () => onRenameAsset(asset)),
+                        _AssetTile(
+                          asset: asset,
+                          selected: _projectUsesAsset(settings, asset),
+                          onTap: () => onApplyAsset(asset),
+                          onLongPress: () => onRenameAsset(asset),
+                        ),
                     ],
                   ],
                 ),
@@ -643,15 +670,39 @@ class _ProjectTile extends StatelessWidget {
 }
 
 class _AssetTile extends StatelessWidget {
-  const _AssetTile({required this.asset, required this.onLongPress});
+  const _AssetTile({
+    required this.asset,
+    required this.selected,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
   final KioAsset asset;
+  final bool selected;
+  final VoidCallback onTap;
   final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context) {
     final hint = asset.type == KioAssetType.model ? 'ZIP package' : asset.originalName;
-    return _ListCard(icon: asset.type.icon, title: asset.displayName, subtitle: '${asset.type.label} · $hint', onLongPress: onLongPress);
+    return _ListCard(
+      icon: asset.type.icon,
+      title: asset.displayName,
+      subtitle: selected ? 'Applied · ${asset.type.label} · $hint' : '${asset.type.label} · $hint',
+      selected: selected,
+      onTap: onTap,
+      onLongPress: onLongPress,
+    );
   }
+}
+
+bool _projectUsesAsset(ProjectSettings settings, KioAsset asset) {
+  return switch (asset.type) {
+    KioAssetType.model => settings.modelAssetId == asset.id,
+    KioAssetType.motion => settings.motionAssetId == asset.id,
+    KioAssetType.music => settings.musicAssetId == asset.id,
+    KioAssetType.camera => settings.cameraAssetId == asset.id,
+  };
 }
 
 class _ListCard extends StatelessWidget {

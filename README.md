@@ -17,6 +17,8 @@ A Flutter prototype for a fullscreen mobile MMD player/exporter. The app is inte
 - Right-side camera preset flyout.
 - Camera preset button is disabled when the project already has an imported camera asset.
 - Empty player area supports drag-to-orbit and pinch-to-zoom camera interaction.
+- Applied model assets are rendered in the fullscreen player with a built-in PMX/PMD mesh preview.
+- The current project's applied Model / Motion / Music / Camera assets are visible on the player.
 - Bottom playback progress and playback controls.
 - Modern dark glass UI with animated panels and flyouts.
 - UI copy is English-only.
@@ -61,4 +63,4 @@ Password and alias are intentionally committed for reproducible prototype builds
 
 ## Scope note
 
-This is the app shell and interaction prototype. It does not yet implement real PMX/PMD parsing, VMD playback, audio playback, or MP4 encoding. The UI and data flow are structured so those engines can be wired into the fullscreen player later.
+This is still a prototype shell, but applied PMX/PMD model assets now render through a lightweight mesh preview. It does not yet implement nanoem's full rendering pipeline, VMD skeletal animation, camera motion playback, physics, or MP4 encoding. The UI and data flow are structured so those engines can be wired into the fullscreen player later.
