@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
@@ -28,7 +29,8 @@ class PmxPreview extends StatefulWidget {
 class _PmxPreviewState extends State<PmxPreview> {
   PmxMesh? mesh;
   String? loadingAssetId;
-  String? message;
+  String? status;
+  bool statusIsError = false;
 
   @override
   void initState() {
@@ -50,7 +52,8 @@ class _PmxPreviewState extends State<PmxPreview> {
       setState(() {
         mesh = null;
         loadingAssetId = null;
-        message = null;
+        status = 'No model selected';
+        statusIsError = false;
       });
       return;
     }
@@ -58,53 +61,93 @@ class _PmxPreviewState extends State<PmxPreview> {
     setState(() {
       mesh = null;
       loadingAssetId = asset.id;
-      message = 'Loading model...';
+      status = 'Loading ${asset.displayName}...';
+      statusIsError = false;
     });
 
     try {
-      final file = await _resolveModelFile(asset);
-      if (file == null) {
-        throw Exception('No PMX file found in model package.');
+      final payload = await _resolvePmxPayload(asset);
+      if (payload == null) {
+        throw Exception('No PMX file found. Re-import model as a ZIP that contains .pmx.');
       }
-      if (!file.path.toLowerCase().endsWith('.pmx')) {
-        throw Exception('PMD preview is not implemented yet. Please use PMX.');
-      }
-      final parsed = await PmxParser.parse(file);
+
+      final parsed = PmxParser.parseBytes(payload.bytes);
       if (!mounted || loadingAssetId != asset.id) return;
+
       setState(() {
         mesh = parsed;
-        message = null;
+        status = 'PMX loaded: ${parsed.vertices.length} vertices / ${parsed.indices.length ~/ 3} triangles';
+        statusIsError = false;
       });
     } catch (error) {
       if (!mounted || loadingAssetId != asset.id) return;
       setState(() {
         mesh = null;
-        message = error.toString().replaceFirst('Exception: ', '');
+        status = error.toString().replaceFirst('Exception: ', '');
+        statusIsError = true;
       });
     }
   }
 
-  Future<File?> _resolveModelFile(KioAsset asset) async {
-    final root = Directory(asset.localPath);
-    if (!root.existsSync()) return null;
+  Future<_PmxPayload?> _resolvePmxPayload(KioAsset asset) async {
+    final asDir = Directory(asset.localPath);
+    final asFile = File(asset.localPath);
 
-    final entry = asset.entryFile;
-    if (entry != null && entry.trim().isNotEmpty) {
-      final direct = File(p.join(root.path, entry));
-      if (direct.existsSync()) return direct;
+    if (asDir.existsSync()) {
+      final entry = asset.entryFile;
+      if (entry != null && entry.trim().isNotEmpty) {
+        final direct = File(p.join(asDir.path, entry));
+        if (direct.existsSync() && direct.path.toLowerCase().endsWith('.pmx')) {
+          return _PmxPayload(direct.path, await direct.readAsBytes());
+        }
+      }
+
+      final files = asDir
+          .listSync(recursive: true, followLinks: false)
+          .whereType<File>()
+          .where((file) => file.path.toLowerCase().endsWith('.pmx'))
+          .toList();
+
+      if (files.isEmpty) return null;
+      files.sort((a, b) => a.path.length.compareTo(b.path.length));
+      return _PmxPayload(files.first.path, await files.first.readAsBytes());
     }
 
-    final files = root
-        .listSync(recursive: true, followLinks: false)
-        .whereType<File>()
-        .where((file) {
-      final lower = file.path.toLowerCase();
-      return lower.endsWith('.pmx') || lower.endsWith('.pmd');
-    }).toList();
+    if (asFile.existsSync()) {
+      final lower = asFile.path.toLowerCase();
+      if (lower.endsWith('.pmx')) {
+        return _PmxPayload(asFile.path, await asFile.readAsBytes());
+      }
 
-    if (files.isEmpty) return null;
-    files.sort((a, b) => a.path.length.compareTo(b.path.length));
-    return files.first;
+      if (lower.endsWith('.zip')) {
+        return _readPmxFromZip(await asFile.readAsBytes(), asFile.path);
+      }
+    }
+
+    return null;
+  }
+
+  _PmxPayload? _readPmxFromZip(Uint8List bytes, String sourceName) {
+    late final Archive archive;
+    try {
+      archive = ZipDecoder().decodeBytes(bytes, verify: true);
+    } catch (_) {
+      throw Exception('Invalid model ZIP.');
+    }
+
+    final pmxEntries = archive.files
+        .where((entry) => entry.isFile && entry.name.toLowerCase().endsWith('.pmx'))
+        .toList();
+
+    if (pmxEntries.isEmpty) return null;
+    pmxEntries.sort((a, b) => a.name.length.compareTo(b.name.length));
+
+    final content = pmxEntries.first.content;
+    if (content is! List<int>) {
+      throw Exception('Cannot read PMX data from ZIP.');
+    }
+
+    return _PmxPayload('$sourceName/${pmxEntries.first.name}', Uint8List.fromList(content));
   }
 
   @override
@@ -122,20 +165,30 @@ class _PmxPreviewState extends State<PmxPreview> {
               zoom: widget.zoom,
             ),
           ),
-        if (message != null)
+        if (status != null)
           Positioned(
             left: 12,
-            right: 90,
-            top: MediaQuery.of(context).padding.top + 64,
+            right: 88,
+            top: MediaQuery.of(context).padding.top + 62,
             child: IgnorePointer(
-              child: Text(
-                message!,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: Color(0xFF8A91A3),
-                  fontWeight: FontWeight.w600,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF11141D),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: statusIsError ? const Color(0xFFFF6680) : const Color(0xFF2A3040),
+                  ),
+                ),
+                child: Text(
+                  status!,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: statusIsError ? const Color(0xFFFFA0AF) : const Color(0xFF8A91A3),
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
             ),
@@ -143,6 +196,12 @@ class _PmxPreviewState extends State<PmxPreview> {
       ],
     );
   }
+}
+
+class _PmxPayload {
+  _PmxPayload(this.name, this.bytes);
+  final String name;
+  final Uint8List bytes;
 }
 
 class PmxMesh {
@@ -174,14 +233,14 @@ class _Vec3 {
   final double z;
 }
 
+
 class PmxParser {
-  static Future<PmxMesh> parse(File file) async {
-    final bytes = await file.readAsBytes();
+  static PmxMesh parseBytes(Uint8List bytes) {
     final r = _Reader(bytes);
 
     final magic = String.fromCharCodes(r.readBytes(4));
     if (magic != 'PMX ') {
-      throw Exception('Invalid PMX header.');
+      throw Exception('Invalid PMX header: $magic');
     }
 
     r.readFloat32();
@@ -205,7 +264,7 @@ class PmxParser {
 
     final vertexCount = r.readInt32();
     if (vertexCount <= 0 || vertexCount > 1000000) {
-      throw Exception('Invalid PMX vertex count.');
+      throw Exception('Invalid PMX vertex count: $vertexCount');
     }
 
     final vertices = <_Vec3>[];
@@ -257,7 +316,7 @@ class PmxParser {
           r.skipFloat32(9);
           break;
         default:
-          throw Exception('Unsupported PMX weight type $weightType.');
+          throw Exception('Unsupported PMX weight type $weightType at vertex $i.');
       }
 
       r.skipFloat32(1);
@@ -265,7 +324,7 @@ class PmxParser {
 
     final indexCount = r.readInt32();
     if (indexCount <= 0 || indexCount > 5000000) {
-      throw Exception('Invalid PMX index count.');
+      throw Exception('Invalid PMX index count: $indexCount');
     }
 
     final indices = <int>[];
@@ -274,6 +333,10 @@ class PmxParser {
       if (index >= 0 && index < vertices.length) {
         indices.add(index);
       }
+    }
+
+    if (indices.length < 3) {
+      throw Exception('PMX has no drawable indices.');
     }
 
     return PmxMesh(
@@ -287,7 +350,6 @@ class PmxParser {
       maxZ: maxZ,
     );
   }
-
 }
 
 class _Reader {
@@ -297,60 +359,61 @@ class _Reader {
   int offset = 0;
 
   int readUint8() {
+    _check(1);
     final v = data.getUint8(offset);
     offset += 1;
     return v;
   }
 
   int readInt32() {
+    _check(4);
     final v = data.getInt32(offset, Endian.little);
     offset += 4;
     return v;
   }
 
   double readFloat32() {
+    _check(4);
     final v = data.getFloat32(offset, Endian.little);
     offset += 4;
     return v;
   }
 
   Uint8List readBytes(int length) {
+    _check(length);
     final out = data.buffer.asUint8List(data.offsetInBytes + offset, length);
     offset += length;
     return out;
   }
 
   void skip(int length) {
+    _check(length);
     offset += length;
   }
 
-  void skipFloat32(int count) {
-    offset += count * 4;
-  }
-
-  void skipIndex(int size) {
-    offset += size;
-  }
+  void skipFloat32(int count) => skip(count * 4);
+  void skipIndex(int size) => skip(size);
 
   void skipText(int encoding) {
     final length = readInt32();
-    if (length < 0 || offset + length > data.lengthInBytes) {
-      throw Exception('Invalid PMX text block.');
-    }
+    if (length < 0) throw Exception('Invalid PMX text length.');
     skip(length);
   }
 
   int readVertexIndex(int size) {
     switch (size) {
       case 1:
+        _check(1);
         final v = data.getUint8(offset);
         offset += 1;
         return v;
       case 2:
+        _check(2);
         final v = data.getUint16(offset, Endian.little);
         offset += 2;
         return v;
       case 4:
+        _check(4);
         final v = data.getInt32(offset, Endian.little);
         offset += 4;
         return v;
@@ -358,7 +421,14 @@ class _Reader {
         throw Exception('Unsupported vertex index size $size.');
     }
   }
+
+  void _check(int length) {
+    if (offset + length > data.lengthInBytes) {
+      throw Exception('Unexpected end of PMX data at $offset.');
+    }
+  }
 }
+
 
 class PmxMeshPainter extends CustomPainter {
   PmxMeshPainter({
@@ -385,7 +455,7 @@ class PmxMeshPainter extends CustomPainter {
     final height = math.max(.001, mesh.maxY - mesh.minY);
     final depth = math.max(.001, mesh.maxZ - mesh.minZ);
     final maxDim = math.max(width, math.max(height, depth));
-    final scale = math.min(size.width, size.height) * .62 / maxDim * zoom;
+    final scale = math.min(size.width, size.height) * .70 / maxDim * zoom;
 
     final yaw = orbitX * math.pi / 180.0;
     final pitch = orbitY * math.pi / 180.0;
@@ -407,45 +477,39 @@ class PmxMeshPainter extends CustomPainter {
 
       projected[i] = Offset(
         size.width * .5 + rx * scale,
-        size.height * .53 - ry * scale,
+        size.height * .56 - ry * scale,
       );
     }
 
-    final line = Paint()
-      ..color = const Color(0xFFE5E8FF)
-      ..strokeWidth = .7
-      ..style = PaintingStyle.stroke;
+    final fill = Paint()
+      ..color = const Color(0x336D83FF)
+      ..style = PaintingStyle.fill;
 
-    final soft = Paint()
-      ..color = const Color(0x556D83FF)
-      ..strokeWidth = 1.2
+    final line = Paint()
+      ..color = const Color(0xFFE9ECFF)
+      ..strokeWidth = .62
       ..style = PaintingStyle.stroke;
 
     final triangleCount = mesh.indices.length ~/ 3;
-    final step = math.max(1, triangleCount ~/ 8500);
+    final step = math.max(1, triangleCount ~/ 9000);
 
     for (var tri = 0; tri < triangleCount; tri += step) {
       final i = tri * 3;
       final a = mesh.indices[i];
       final b = mesh.indices[i + 1];
       final c = mesh.indices[i + 2];
+
       if (a >= projected.length || b >= projected.length || c >= projected.length) continue;
 
-      final pa = projected[a];
-      final pb = projected[b];
-      final pc = projected[c];
+      final path = Path()
+        ..moveTo(projected[a].dx, projected[a].dy)
+        ..lineTo(projected[b].dx, projected[b].dy)
+        ..lineTo(projected[c].dx, projected[c].dy)
+        ..close();
 
-      canvas.drawLine(pa, pb, line);
-      canvas.drawLine(pb, pc, line);
-      canvas.drawLine(pc, pa, line);
+      canvas.drawPath(path, fill);
+      canvas.drawPath(path, line);
     }
-
-    final rect = Rect.fromCenter(
-      center: Offset(size.width * .5, size.height * .53),
-      width: math.max(20, width * scale),
-      height: math.max(20, height * scale),
-    );
-    canvas.drawOval(rect.inflate(8), soft);
   }
 
   @override
