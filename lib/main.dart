@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:just_audio/just_audio.dart';
 
 import 'crash_log_service.dart';
 import 'kio_store.dart';
@@ -56,7 +57,9 @@ class KioWorkspace extends StatefulWidget {
 
 class _KioWorkspaceState extends State<KioWorkspace> {
   final store = KioStore();
+  final player = AudioPlayer();
   Timer? timer;
+  String? loadedMusicId;
   bool drawerOpen = false;
   bool importOpen = false;
   bool presetOpen = false;
@@ -68,17 +71,21 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   void initState() {
     super.initState();
     store.addListener(_refresh);
-    unawaited(store.load());
+    unawaited(store.load().then((_) => _syncAudio()));
   }
 
   @override
   void dispose() {
     timer?.cancel();
+    unawaited(player.dispose());
     store.removeListener(_refresh);
     super.dispose();
   }
 
-  void _refresh() => setState(() {});
+  void _refresh() {
+    setState(() {});
+    unawaited(_syncAudio());
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -111,7 +118,11 @@ class _KioWorkspaceState extends State<KioWorkspace> {
             project: project,
             playing: playing,
             onPlayPause: _togglePlayback,
-            onSeek: (v) => unawaited(store.updatePlayhead(v.round())),
+            onSeek: (v) {
+              final ms = v.round();
+              unawaited(player.seek(Duration(milliseconds: ms)));
+              unawaited(store.updatePlayhead(ms));
+            },
           ),
           _SidePanel(
             open: drawerOpen,
@@ -181,20 +192,62 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   void _togglePlayback() {
     final duration = store.selectedProject.settings.duration;
     if (duration <= 0) {
-      _toast('No playable timeline yet.');
+      _toast('Select a music asset first.');
       return;
     }
+
     if (playing) {
       timer?.cancel();
       timer = null;
+      unawaited(player.pause());
       setState(() => playing = false);
       return;
     }
+
     setState(() => playing = true);
-    timer = Timer.periodic(const Duration(milliseconds: 80), (_) {
+    unawaited(player.seek(Duration(milliseconds: store.selectedProject.settings.playhead)));
+    unawaited(player.play());
+
+    timer = Timer.periodic(const Duration(milliseconds: 120), (_) {
       final s = store.selectedProject.settings;
-      unawaited(store.updatePlayhead(s.playhead + 80 >= s.duration ? 0 : s.playhead + 80));
+      final pos = player.position.inMilliseconds;
+      if (s.duration > 0 && pos >= s.duration) {
+        timer?.cancel();
+        timer = null;
+        unawaited(player.pause());
+        unawaited(player.seek(Duration.zero));
+        unawaited(store.updatePlayhead(0));
+        setState(() => playing = false);
+        return;
+      }
+      unawaited(store.updatePlayhead(pos.clamp(0, s.duration).toInt()));
     });
+  }
+
+  Future<void> _syncAudio() async {
+    if (!store.isLoaded) return;
+    final musicId = store.selectedProject.settings.musicAssetId;
+    if (musicId == loadedMusicId) return;
+
+    loadedMusicId = musicId;
+    if (musicId == null) {
+      await player.stop();
+      if (store.selectedProject.settings.duration != 0) {
+        await store.updateDuration(0);
+      }
+      return;
+    }
+
+    final asset = store.assetById(musicId);
+    if (asset == null) return;
+
+    try {
+      final duration = await player.setFilePath(asset.localPath);
+      await store.updateDuration(duration?.inMilliseconds ?? 0);
+    } catch (error, stack) {
+      await CrashLogService.writeError(error, stack, origin: 'audio-load');
+      _toast('Audio load failed. Crash log saved.');
+    }
   }
 
   void _updateCamera(Offset delta, double scale) {
@@ -255,7 +308,6 @@ class _PlayerCanvasState extends State<_PlayerCanvas> {
         fit: StackFit.expand,
         children: [
           CustomPaint(painter: _StagePainter(orbitX: s.orbitX, orbitY: s.orbitY, zoom: s.zoom)),
-          Center(child: _SelectionSummary(model: model, motion: motion, music: music, camera: camera)),
         ],
       ),
     );
@@ -725,15 +777,15 @@ class _IconTile extends StatelessWidget {
       onTap: disabled ? null : onTap,
       borderRadius: BorderRadius.circular(14),
       child: Container(
-        width: 54,
-        height: 46,
+        width: 48,
+        height: 40,
         decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(14), border: Border.all(color: accent && !disabled ? KioColors.blue : KioColors.line)),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 17),
+            Icon(icon, size: 14),
             const SizedBox(height: 2),
-            Text(label, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700)),
+            Text(label, style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w700)),
           ],
         ),
       ),
@@ -755,14 +807,14 @@ class _MiniTile extends StatelessWidget {
       onLongPress: onLongPress,
       borderRadius: BorderRadius.circular(13),
       child: Container(
-        width: 50,
-        height: 42,
+        width: 44,
+        height: 36,
         margin: const EdgeInsets.only(left: 6),
         decoration: BoxDecoration(color: KioColors.panel, borderRadius: BorderRadius.circular(13), border: Border.all(color: KioColors.line)),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 15),
+            Icon(icon, size: 14),
             const SizedBox(height: 2),
             Text(label, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w700)),
           ],

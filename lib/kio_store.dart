@@ -131,6 +131,19 @@ class KioStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> updateDuration(int duration) async {
+    final s = selectedProject.settings;
+    await _updateSelectedProject(
+      selectedProject.copyWith(
+        updatedAt: DateTime.now(),
+        settings: s.copyWith(
+          duration: duration < 0 ? 0 : duration,
+          playhead: 0,
+        ),
+      ),
+    );
+  }
+
   Future<void> updatePlayhead(int value) async {
     final s = selectedProject.settings;
     await _updateSelectedProject(
