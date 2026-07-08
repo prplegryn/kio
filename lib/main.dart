@@ -9,6 +9,7 @@ import 'package:just_audio/just_audio.dart';
 import 'crash_log_service.dart';
 import 'kio_store.dart';
 import 'models.dart';
+import 'pmx_preview.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -292,9 +293,6 @@ class _PlayerCanvasState extends State<_PlayerCanvas> {
   Widget build(BuildContext context) {
     final s = widget.project.settings;
     final model = widget.store.assetById(s.modelAssetId);
-    final motion = widget.store.assetById(s.motionAssetId);
-    final music = widget.store.assetById(s.musicAssetId);
-    final camera = widget.store.assetById(s.cameraAssetId);
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
