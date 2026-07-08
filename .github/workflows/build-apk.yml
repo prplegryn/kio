@@ -44,6 +44,8 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
+      - name: Create Android local.properties
+        run: echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
 
       - name: Analyze
         run: flutter analyze
