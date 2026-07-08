@@ -49,6 +49,7 @@ class KioAsset {
     required this.localPath,
     required this.sha256,
     required this.importedAt,
+    this.durationMs = 0,
     this.entryFile,
   });
 
@@ -59,9 +60,10 @@ class KioAsset {
   final String localPath;
   final String sha256;
   final DateTime importedAt;
+  final int durationMs;
   final String? entryFile;
 
-  KioAsset copyWith({String? displayName}) {
+  KioAsset copyWith({String? displayName, int? durationMs}) {
     return KioAsset(
       id: id,
       type: type,
@@ -70,6 +72,7 @@ class KioAsset {
       localPath: localPath,
       sha256: sha256,
       importedAt: importedAt,
+      durationMs: durationMs ?? this.durationMs,
       entryFile: entryFile,
     );
   }
@@ -82,6 +85,7 @@ class KioAsset {
         'localPath': localPath,
         'sha256': sha256,
         'importedAt': importedAt.toIso8601String(),
+        'durationMs': durationMs,
         'entryFile': entryFile,
       };
 
@@ -93,6 +97,7 @@ class KioAsset {
         localPath: json['localPath'] as String,
         sha256: json['sha256'] as String,
         importedAt: DateTime.parse(json['importedAt'] as String),
+        durationMs: (json['durationMs'] as num?)?.toInt() ?? 0,
         entryFile: json['entryFile'] as String?,
       );
 }

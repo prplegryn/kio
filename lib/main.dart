@@ -1,12 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:just_audio/just_audio.dart';
 
 import 'crash_log_service.dart';
+import 'export_service.dart';
 import 'kio_store.dart';
 import 'models.dart';
 import 'pmx_preview.dart';
@@ -59,14 +65,20 @@ class KioWorkspace extends StatefulWidget {
 class _KioWorkspaceState extends State<KioWorkspace> {
   final store = KioStore();
   final player = AudioPlayer();
+  final previewKey = GlobalKey();
   Timer? timer;
+  DateTime? playbackStartedAt;
+  int playbackStartMs = 0;
+  int? exportPlayheadMs;
   String? loadedMusicId;
+  String? exportStatus;
   bool drawerOpen = false;
   bool importOpen = false;
   bool presetOpen = false;
   bool projectsOpen = true;
   bool assetsOpen = true;
   bool playing = false;
+  bool exporting = false;
 
   @override
   void initState() {
@@ -98,7 +110,18 @@ class _KioWorkspaceState extends State<KioWorkspace> {
     return Scaffold(
       body: Stack(
         children: [
-          Positioned.fill(child: _PlayerCanvas(project: project, store: store, onCameraChanged: _updateCamera)),
+          Positioned.fill(
+            child: RepaintBoundary(
+              key: previewKey,
+              child: _PlayerCanvas(
+                project: project,
+                store: store,
+                playheadOverrideMs: exportPlayheadMs,
+                showOverlays: !exporting,
+                onCameraChanged: _updateCamera,
+              ),
+            ),
+          ),
           Positioned(
             top: MediaQuery.of(context).padding.top + 8,
             left: 8,
@@ -109,11 +132,12 @@ class _KioWorkspaceState extends State<KioWorkspace> {
             importOpen: importOpen,
             presetOpen: presetOpen,
             onToggleImport: () => setState(() => importOpen = !importOpen),
-            onTogglePreset: project.settings.hasImportedCamera ? null : () => setState(() => presetOpen = !presetOpen),
+            onTogglePreset: () => setState(() => presetOpen = !presetOpen),
             onSelectAsset: _showAssetPicker,
             onAddPreset: _addPreset,
             onApplyPreset: (preset) => unawaited(store.applyCameraPreset(preset.id)),
             onResetPreset: _resetPreset,
+            onExport: _exportFrames,
           ),
           _BottomPlayback(
             project: project,
@@ -140,6 +164,23 @@ class _KioWorkspaceState extends State<KioWorkspace> {
             onRenameAsset: _renameAsset,
           ),
           if (store.isBusy) const Positioned.fill(child: ColoredBox(color: Color(0x99000000), child: Center(child: CircularProgressIndicator(strokeWidth: 2)))),
+          if (exporting)
+            Positioned.fill(
+              child: ColoredBox(
+                color: const Color(0xAA000000),
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: KioColors.panel,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: KioColors.line),
+                    ),
+                    child: Text(exportStatus ?? 'Exporting...', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -203,7 +244,7 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   void _togglePlayback() {
     final duration = store.selectedProject.settings.duration;
     if (duration <= 0) {
-      _toast('Select a music asset first.');
+      _toast('Select a motion, camera, or music asset first.');
       return;
     }
 
@@ -216,12 +257,17 @@ class _KioWorkspaceState extends State<KioWorkspace> {
     }
 
     setState(() => playing = true);
-    unawaited(player.seek(Duration(milliseconds: store.selectedProject.settings.playhead)));
-    unawaited(player.play());
+    playbackStartMs = store.selectedProject.settings.playhead;
+    playbackStartedAt = DateTime.now();
+    if (store.selectedProject.settings.musicAssetId != null) {
+      unawaited(player.seek(Duration(milliseconds: playbackStartMs)));
+      unawaited(player.play());
+    }
 
     timer = Timer.periodic(const Duration(milliseconds: 120), (_) {
       final s = store.selectedProject.settings;
-      final pos = player.position.inMilliseconds;
+      final elapsed = DateTime.now().difference(playbackStartedAt ?? DateTime.now()).inMilliseconds;
+      final pos = s.musicAssetId != null ? player.position.inMilliseconds : playbackStartMs + elapsed;
       if (s.duration > 0 && pos >= s.duration) {
         timer?.cancel();
         timer = null;
@@ -280,6 +326,89 @@ class _KioWorkspaceState extends State<KioWorkspace> {
     _toast('${preset.name} reset.');
   }
 
+  Future<void> _exportFrames() async {
+    if (exporting) return;
+    final project = store.selectedProject;
+    if (project.settings.modelAssetId == null) {
+      _toast('Select a model first.');
+      return;
+    }
+
+    timer?.cancel();
+    timer = null;
+    if (playing) {
+      await player.pause();
+      setState(() => playing = false);
+    }
+
+    final duration = math.max(project.settings.duration, 1000);
+    const fps = 12;
+    const maxFrames = 720;
+    final requestedFrames = math.max(1, (duration * fps / 1000).ceil());
+    final frameCount = math.min(requestedFrames, maxFrames);
+    final archive = Archive();
+    final originalPlayhead = project.settings.playhead;
+
+    setState(() {
+      exporting = true;
+      exportStatus = 'Preparing export...';
+      exportPlayheadMs = 0;
+    });
+
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      final boundary = previewKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) throw Exception('Preview is not ready.');
+
+      for (var i = 0; i < frameCount; i++) {
+        final ms = frameCount == 1 ? originalPlayhead : (i * 1000 / fps).round().clamp(0, duration).toInt();
+        setState(() {
+          exportPlayheadMs = ms;
+          exportStatus = 'Exporting frame ${i + 1} / $frameCount';
+        });
+        await WidgetsBinding.instance.endOfFrame;
+
+        final image = await boundary.toImage(pixelRatio: 1);
+        final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+        image.dispose();
+        if (byteData == null) throw Exception('Unable to encode frame.');
+        final bytes = byteData.buffer.asUint8List();
+        archive.addFile(ArchiveFile('frames/frame_${i.toString().padLeft(4, '0')}.png', bytes.length, bytes));
+      }
+
+      final manifest = jsonEncode({
+        'project': project.name,
+        'durationMs': duration,
+        'fps': fps,
+        'frames': frameCount,
+        'capped': requestedFrames > maxFrames,
+        'model': store.assetById(project.settings.modelAssetId)?.displayName,
+        'motion': store.assetById(project.settings.motionAssetId)?.displayName,
+        'camera': store.assetById(project.settings.cameraAssetId)?.displayName,
+        'music': store.assetById(project.settings.musicAssetId)?.displayName,
+      });
+      final manifestBytes = utf8.encode(manifest);
+      archive.addFile(ArchiveFile('manifest.json', manifestBytes.length, manifestBytes));
+
+      final zipBytes = ZipEncoder().encode(archive);
+      if (zipBytes == null) throw Exception('Unable to build ZIP.');
+      final now = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final path = await ExportService.writeZip('kio_export_$now.zip', Uint8List.fromList(zipBytes));
+      _toast('Export saved: $path');
+    } catch (error, stack) {
+      await CrashLogService.writeError(error, stack, origin: 'frame-export');
+      _toast('Export failed. Crash log saved.');
+    } finally {
+      if (mounted) {
+        setState(() {
+          exporting = false;
+          exportStatus = null;
+          exportPlayheadMs = null;
+        });
+      }
+    }
+  }
+
   void _toast(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating));
@@ -287,9 +416,18 @@ class _KioWorkspaceState extends State<KioWorkspace> {
 }
 
 class _PlayerCanvas extends StatefulWidget {
-  const _PlayerCanvas({required this.project, required this.store, required this.onCameraChanged});
+  const _PlayerCanvas({
+    required this.project,
+    required this.store,
+    required this.playheadOverrideMs,
+    required this.showOverlays,
+    required this.onCameraChanged,
+  });
+
   final KioProject project;
   final KioStore store;
+  final int? playheadOverrideMs;
+  final bool showOverlays;
   final void Function(Offset delta, double scale) onCameraChanged;
 
   @override
@@ -302,6 +440,7 @@ class _PlayerCanvasState extends State<_PlayerCanvas> {
   @override
   Widget build(BuildContext context) {
     final s = widget.project.settings;
+    final playheadMs = widget.playheadOverrideMs ?? s.playhead;
     final model = widget.store.assetById(s.modelAssetId);
     final motion = widget.store.assetById(s.motionAssetId);
     final music = widget.store.assetById(s.musicAssetId);
@@ -319,12 +458,22 @@ class _PlayerCanvasState extends State<_PlayerCanvas> {
         fit: StackFit.expand,
         children: [
           CustomPaint(painter: _StagePainter(orbitX: s.orbitX, orbitY: s.orbitY, zoom: s.zoom)),
-          PmxPreview(asset: model, orbitX: s.orbitX, orbitY: s.orbitY, zoom: s.zoom),
-          Positioned(
-            left: 8,
-            bottom: MediaQuery.of(context).padding.bottom + 96,
-            child: _SelectionSummary(model: model, motion: motion, music: music, camera: camera),
+          PmxPreview(
+            asset: model,
+            motionAsset: motion,
+            cameraAsset: camera,
+            orbitX: s.orbitX,
+            orbitY: s.orbitY,
+            zoom: s.zoom,
+            playheadMs: playheadMs,
+            showStatus: widget.showOverlays,
           ),
+          if (widget.showOverlays)
+            Positioned(
+              left: 8,
+              bottom: MediaQuery.of(context).padding.bottom + 96,
+              child: _SelectionSummary(model: model, motion: motion, music: music, camera: camera),
+            ),
         ],
       ),
     );
@@ -419,6 +568,7 @@ class _RightControls extends StatelessWidget {
     required this.onAddPreset,
     required this.onApplyPreset,
     required this.onResetPreset,
+    required this.onExport,
   });
 
   final KioProject project;
@@ -430,6 +580,7 @@ class _RightControls extends StatelessWidget {
   final VoidCallback onAddPreset;
   final void Function(CameraPreset preset) onApplyPreset;
   final void Function(CameraPreset preset) onResetPreset;
+  final VoidCallback onExport;
 
   @override
   Widget build(BuildContext context) {
@@ -462,6 +613,8 @@ class _RightControls extends StatelessWidget {
                 ),
             ],
           ),
+          const SizedBox(height: 8),
+          _IconTile(icon: Icons.file_download_rounded, label: 'Export', onTap: onExport),
         ],
       ),
     );

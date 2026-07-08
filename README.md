@@ -15,11 +15,13 @@ A Flutter prototype for a fullscreen mobile MMD player/exporter. The app is inte
 - Different icons for different asset types.
 - Right-side import flyout: Import -> Model / Motion / Music / Camera.
 - Right-side camera preset flyout.
-- Camera preset button is disabled when the project already has an imported camera asset.
 - Empty player area supports drag-to-orbit and pinch-to-zoom camera interaction.
 - Applied model assets are rendered in the fullscreen player with a built-in PMX/PMD mesh preview.
 - The current project's applied Model / Motion / Music / Camera assets are visible on the player.
 - Bottom playback progress and playback controls.
+- VMD motion playback drives a lightweight PMX/PMD bone skinning preview for common MMD bones.
+- VMD camera playback drives the preview camera.
+- Export writes a PNG frame-sequence ZIP plus `manifest.json` to `Downloads/kio_exports`.
 - Modern dark glass UI with animated panels and flyouts.
 - UI copy is English-only.
 - Inter typography through `google_fonts`.
@@ -63,4 +65,4 @@ Password and alias are intentionally committed for reproducible prototype builds
 
 ## Scope note
 
-This is still a prototype shell, but applied PMX/PMD model assets now render through a lightweight mesh preview. It does not yet implement nanoem's full rendering pipeline, VMD skeletal animation, camera motion playback, physics, or MP4 encoding. The UI and data flow are structured so those engines can be wired into the fullscreen player later.
+This is still not a full nanoem port. It supports lightweight PMX/PMD mesh rendering, common-bone VMD motion playback, VMD camera playback, audio playback, manual camera presets, and PNG frame-sequence ZIP export. It does not yet implement nanoem's full material/texture renderer, full Shift-JIS bone-name coverage, inverse-kinematics solving, physics, morph animation, NMD playback, or MP4 encoding.

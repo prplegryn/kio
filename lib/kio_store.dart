@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'models.dart';
+import 'vmd_parser.dart';
 
 class AssetImportException implements Exception {
   AssetImportException(this.message);
@@ -47,6 +48,7 @@ class KioStore extends ChangeNotifier {
         _state = KioState.defaultState();
       }
     }
+    await _repairAssetMetadata();
     _isLoaded = true;
     notifyListeners();
   }
@@ -113,10 +115,17 @@ class KioStore extends ChangeNotifier {
   Future<void> attachAssetToSelectedProject(KioAsset asset) async {
     final s = selectedProject.settings;
     final next = switch (asset.type) {
-      KioAssetType.model => s.copyWith(modelAssetId: asset.id, playhead: 0, duration: 0),
-      KioAssetType.motion => s.copyWith(motionAssetId: asset.id, playhead: 0, duration: 0),
-      KioAssetType.music => s.copyWith(musicAssetId: asset.id, playhead: 0, duration: 0),
-      KioAssetType.camera => s.copyWith(cameraAssetId: asset.id),
+      KioAssetType.model => s.copyWith(modelAssetId: asset.id, playhead: 0),
+      KioAssetType.motion => s.copyWith(
+          motionAssetId: asset.id,
+          playhead: 0,
+          duration: _timelineDuration(s.copyWith(motionAssetId: asset.id)),
+        ),
+      KioAssetType.music => s.copyWith(musicAssetId: asset.id, playhead: 0),
+      KioAssetType.camera => s.copyWith(
+          cameraAssetId: asset.id,
+          duration: _timelineDuration(s.copyWith(cameraAssetId: asset.id)),
+        ),
     };
     await _updateSelectedProject(selectedProject.copyWith(updatedAt: DateTime.now(), settings: next));
   }
@@ -133,11 +142,12 @@ class KioStore extends ChangeNotifier {
 
   Future<void> updateDuration(int duration) async {
     final s = selectedProject.settings;
+    final nextDuration = mathMax(duration, _timelineDuration(s, includeCurrentDuration: false));
     await _updateSelectedProject(
       selectedProject.copyWith(
         updatedAt: DateTime.now(),
         settings: s.copyWith(
-          duration: duration < 0 ? 0 : duration,
+          duration: nextDuration < 0 ? 0 : nextDuration,
           playhead: 0,
         ),
       ),
@@ -209,6 +219,7 @@ class KioStore extends ChangeNotifier {
     await root.create(recursive: true);
     final target = File(p.join(root.path, '${checksum.substring(0, 12)}_${_safeFileName(originalName)}'));
     await source.copy(target.path);
+    final durationMs = await _durationForImportedAsset(type, target);
     return KioAsset(
       id: _uuid.v4(),
       type: type,
@@ -217,6 +228,7 @@ class KioStore extends ChangeNotifier {
       localPath: target.path,
       sha256: checksum,
       importedAt: DateTime.now(),
+      durationMs: durationMs,
       entryFile: p.basename(target.path),
     );
   }
@@ -272,6 +284,7 @@ class KioStore extends ChangeNotifier {
       localPath: targetDir.path,
       sha256: checksum,
       importedAt: DateTime.now(),
+      durationMs: 0,
       entryFile: _safeRelativePath(modelFiles.first.name),
     );
   }
@@ -317,4 +330,41 @@ class KioStore extends ChangeNotifier {
   int _modelPriority(String path) {
     return path.toLowerCase().endsWith('.pmx') ? 0 : 1;
   }
+
+  Future<int> _durationForImportedAsset(KioAssetType type, File file) async {
+    if (type != KioAssetType.motion && type != KioAssetType.camera) return 0;
+    final data = await VmdParser.parseAssetFile(file.path);
+    return data?.durationMs ?? 0;
+  }
+
+  Future<void> _repairAssetMetadata() async {
+    var changed = false;
+    final nextAssets = <KioAsset>[];
+    for (final asset in _state.assets) {
+      if ((asset.type == KioAssetType.motion || asset.type == KioAssetType.camera) &&
+          asset.durationMs == 0 &&
+          asset.localPath.toLowerCase().endsWith('.vmd') &&
+          File(asset.localPath).existsSync()) {
+        final durationMs = await _durationForImportedAsset(asset.type, File(asset.localPath));
+        if (durationMs > 0) {
+          nextAssets.add(asset.copyWith(durationMs: durationMs));
+          changed = true;
+          continue;
+        }
+      }
+      nextAssets.add(asset);
+    }
+    if (!changed) return;
+    _state = _state.copyWith(assets: nextAssets);
+    await save();
+  }
+
+  int _timelineDuration(ProjectSettings settings, {bool includeCurrentDuration = true}) {
+    var duration = includeCurrentDuration ? settings.duration : 0;
+    duration = mathMax(duration, assetById(settings.motionAssetId)?.durationMs ?? 0);
+    duration = mathMax(duration, assetById(settings.cameraAssetId)?.durationMs ?? 0);
+    return duration;
+  }
 }
+
+int mathMax(int a, int b) => a > b ? a : b;

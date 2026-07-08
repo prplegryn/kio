@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -7,20 +8,29 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import 'models.dart';
+import 'vmd_parser.dart';
 
 class PmxPreview extends StatefulWidget {
   const PmxPreview({
     super.key,
     required this.asset,
+    required this.motionAsset,
+    required this.cameraAsset,
     required this.orbitX,
     required this.orbitY,
     required this.zoom,
+    required this.playheadMs,
+    this.showStatus = true,
   });
 
   final KioAsset? asset;
+  final KioAsset? motionAsset;
+  final KioAsset? cameraAsset;
   final double orbitX;
   final double orbitY;
   final double zoom;
+  final int playheadMs;
+  final bool showStatus;
 
   @override
   State<PmxPreview> createState() => _PmxPreviewState();
@@ -28,7 +38,9 @@ class PmxPreview extends StatefulWidget {
 
 class _PmxPreviewState extends State<PmxPreview> {
   PmxMesh? mesh;
-  String? loadingAssetId;
+  VmdData? motion;
+  VmdData? camera;
+  String? loadingKey;
   String? status;
   bool statusIsError = false;
 
@@ -41,17 +53,22 @@ class _PmxPreviewState extends State<PmxPreview> {
   @override
   void didUpdateWidget(covariant PmxPreview oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.asset?.id != widget.asset?.id) {
+    if (oldWidget.asset?.id != widget.asset?.id ||
+        oldWidget.motionAsset?.id != widget.motionAsset?.id ||
+        oldWidget.cameraAsset?.id != widget.cameraAsset?.id) {
       _load();
     }
   }
 
   Future<void> _load() async {
     final asset = widget.asset;
+    final key = '${asset?.id ?? '-'}:${widget.motionAsset?.id ?? '-'}:${widget.cameraAsset?.id ?? '-'}';
     if (asset == null) {
       setState(() {
         mesh = null;
-        loadingAssetId = null;
+        motion = null;
+        camera = null;
+        loadingKey = null;
         status = 'No model selected';
         statusIsError = false;
       });
@@ -60,7 +77,9 @@ class _PmxPreviewState extends State<PmxPreview> {
 
     setState(() {
       mesh = null;
-      loadingAssetId = asset.id;
+      motion = null;
+      camera = null;
+      loadingKey = key;
       status = 'Loading ${asset.displayName}...';
       statusIsError = false;
     });
@@ -71,22 +90,50 @@ class _PmxPreviewState extends State<PmxPreview> {
         throw Exception('No PMX or PMD file found. Re-import model as a ZIP that contains a supported model.');
       }
 
-      final parsed = MmdMeshParser.parseBytes(payload.bytes);
-      if (!mounted || loadingAssetId != asset.id) return;
+      final parsedMesh = MmdMeshParser.parseBytes(payload.bytes);
+      final parsedMotion = await _loadVmd(widget.motionAsset);
+      final parsedCamera = await _loadVmd(widget.cameraAsset);
+      if (!mounted || loadingKey != key) return;
 
       setState(() {
-        mesh = parsed;
-        status = '${parsed.format} loaded: ${parsed.vertices.length} vertices / ${parsed.indices.length ~/ 3} triangles';
+        mesh = parsedMesh;
+        motion = parsedMotion;
+        camera = parsedCamera;
+        status = _statusFor(parsedMesh, parsedMotion, parsedCamera);
         statusIsError = false;
       });
     } catch (error) {
-      if (!mounted || loadingAssetId != asset.id) return;
+      if (!mounted || loadingKey != key) return;
       setState(() {
         mesh = null;
+        motion = null;
+        camera = null;
         status = error.toString().replaceFirst('Exception: ', '');
         statusIsError = true;
       });
     }
+  }
+
+  Future<VmdData?> _loadVmd(KioAsset? asset) async {
+    if (asset == null) return null;
+    return VmdParser.parseAssetFile(asset.localPath);
+  }
+
+  String _statusFor(PmxMesh mesh, VmdData? motion, VmdData? camera) {
+    final parts = [
+      '${mesh.format}: ${mesh.vertices.length} vertices / ${mesh.indices.length ~/ 3} triangles',
+    ];
+    if (motion != null && motion.hasBoneMotion) {
+      parts.add('motion ${motion.maxFrame}f');
+    } else if (widget.motionAsset != null) {
+      parts.add('${p.extension(widget.motionAsset!.originalName).toUpperCase().replaceFirst('.', '')} motion not playable');
+    }
+    if (camera != null && camera.hasCameraMotion) {
+      parts.add('camera ${camera.maxFrame}f');
+    } else if (widget.cameraAsset != null) {
+      parts.add('${p.extension(widget.cameraAsset!.originalName).toUpperCase().replaceFirst('.', '')} camera not playable');
+    }
+    return parts.join(' · ');
   }
 
   Future<_PmxPayload?> _resolveModelPayload(KioAsset asset) async {
@@ -181,12 +228,15 @@ class _PmxPreviewState extends State<PmxPreview> {
           CustomPaint(
             painter: PmxMeshPainter(
               mesh: current,
+              motion: motion,
+              camera: camera,
+              playheadMs: widget.playheadMs,
               orbitX: widget.orbitX,
               orbitY: widget.orbitY,
               zoom: widget.zoom,
             ),
           ),
-        if (status != null)
+        if (widget.showStatus && status != null)
           Positioned(
             left: 12,
             right: 88,
@@ -230,6 +280,7 @@ class PmxMesh {
     required this.format,
     required this.vertices,
     required this.indices,
+    required this.bones,
     required this.minX,
     required this.maxX,
     required this.minY,
@@ -239,8 +290,9 @@ class PmxMesh {
   });
 
   final String format;
-  final List<_Vec3> vertices;
+  final List<MmdVertex> vertices;
   final List<int> indices;
+  final List<MmdBone> bones;
   final double minX;
   final double maxX;
   final double minY;
@@ -249,13 +301,41 @@ class PmxMesh {
   final double maxZ;
 }
 
-class _Vec3 {
-  const _Vec3(this.x, this.y, this.z);
-  final double x;
-  final double y;
-  final double z;
+class MmdVertex {
+  MmdVertex({required this.bindPosition, required this.weights});
+
+  final MmdVec3 bindPosition;
+  final List<MmdBoneWeight> weights;
 }
 
+class MmdBoneWeight {
+  const MmdBoneWeight(this.boneIndex, this.weight);
+
+  final int boneIndex;
+  final double weight;
+}
+
+class MmdBone {
+  MmdBone({
+    required this.canonicalName,
+    required this.parentIndex,
+    required this.position,
+    required this.inverseBind,
+  });
+
+  final String canonicalName;
+  final int parentIndex;
+  final MmdVec3 position;
+  final MmdMat4 inverseBind;
+}
+
+class _RawBone {
+  _RawBone({required this.name, required this.parentIndex, required this.position});
+
+  final String name;
+  final int parentIndex;
+  final MmdVec3 position;
+}
 
 class MmdMeshParser {
   static PmxMesh parseBytes(Uint8List bytes) {
@@ -292,14 +372,18 @@ class PmxParser {
     final textEncoding = r.readUint8();
     final additionalUv = r.readUint8();
     final vertexIndexSize = r.readUint8();
-    r.readUint8();
+    final textureIndexSize = r.readUint8();
     r.readUint8();
     final boneIndexSize = r.readUint8();
     r.readUint8();
     r.readUint8();
 
+    for (var i = 8; i < globalsCount; i++) {
+      r.readUint8();
+    }
+
     for (var i = 0; i < 4; i++) {
-      r.skipText(textEncoding);
+      r.readText(textEncoding);
     }
 
     final vertexCount = r.readInt32();
@@ -307,7 +391,7 @@ class PmxParser {
       throw Exception('Invalid PMX vertex count: $vertexCount');
     }
 
-    final vertices = <_Vec3>[];
+    final vertices = <MmdVertex>[];
     double minX = double.infinity;
     double minY = double.infinity;
     double minZ = double.infinity;
@@ -316,50 +400,21 @@ class PmxParser {
     double maxZ = -double.infinity;
 
     for (var i = 0; i < vertexCount; i++) {
-      final x = r.readFloat32();
-      final y = r.readFloat32();
-      final z = r.readFloat32();
-
-      vertices.add(_Vec3(x, y, z));
-      minX = math.min(minX, x);
-      minY = math.min(minY, y);
-      minZ = math.min(minZ, z);
-      maxX = math.max(maxX, x);
-      maxY = math.max(maxY, y);
-      maxZ = math.max(maxZ, z);
+      final position = MmdVec3(r.readFloat32(), r.readFloat32(), r.readFloat32());
+      minX = math.min(minX, position.x);
+      minY = math.min(minY, position.y);
+      minZ = math.min(minZ, position.z);
+      maxX = math.max(maxX, position.x);
+      maxY = math.max(maxY, position.y);
+      maxZ = math.max(maxZ, position.z);
 
       r.skipFloat32(3);
       r.skipFloat32(2);
       r.skipFloat32(additionalUv * 4);
 
-      final weightType = r.readUint8();
-      switch (weightType) {
-        case 0:
-          r.skipIndex(boneIndexSize);
-          break;
-        case 1:
-          r.skipIndex(boneIndexSize);
-          r.skipIndex(boneIndexSize);
-          r.skipFloat32(1);
-          break;
-        case 2:
-        case 4:
-          for (var j = 0; j < 4; j++) {
-            r.skipIndex(boneIndexSize);
-          }
-          r.skipFloat32(4);
-          break;
-        case 3:
-          r.skipIndex(boneIndexSize);
-          r.skipIndex(boneIndexSize);
-          r.skipFloat32(1);
-          r.skipFloat32(9);
-          break;
-        default:
-          throw Exception('Unsupported PMX weight type $weightType at vertex $i.');
-      }
-
+      final weights = _readPmxWeights(r, boneIndexSize);
       r.skipFloat32(1);
+      vertices.add(MmdVertex(bindPosition: position, weights: weights));
     }
 
     final indexCount = r.readInt32();
@@ -379,10 +434,27 @@ class PmxParser {
       throw Exception('PMX has no drawable indices.');
     }
 
+    final textureCount = r.readInt32();
+    for (var i = 0; i < textureCount; i++) {
+      r.readText(textEncoding);
+    }
+
+    final materialCount = r.readInt32();
+    for (var i = 0; i < materialCount; i++) {
+      _skipPmxMaterial(r, textEncoding, textureIndexSize);
+    }
+
+    final boneCount = r.readInt32();
+    final rawBones = <_RawBone>[];
+    for (var i = 0; i < boneCount; i++) {
+      rawBones.add(_readPmxBone(r, textEncoding, boneIndexSize));
+    }
+
     return PmxMesh(
       format: 'PMX',
       vertices: vertices,
       indices: indices,
+      bones: _buildBones(rawBones),
       minX: minX,
       maxX: maxX,
       minY: minY,
@@ -390,6 +462,107 @@ class PmxParser {
       minZ: minZ,
       maxZ: maxZ,
     );
+  }
+
+  static List<MmdBoneWeight> _readPmxWeights(_Reader r, int boneIndexSize) {
+    final weightType = r.readUint8();
+    switch (weightType) {
+      case 0:
+        return _cleanWeights([MmdBoneWeight(r.readIndex(boneIndexSize, signed: true), 1)]);
+      case 1:
+        final b1 = r.readIndex(boneIndexSize, signed: true);
+        final b2 = r.readIndex(boneIndexSize, signed: true);
+        final w = r.readFloat32();
+        return _cleanWeights([MmdBoneWeight(b1, w), MmdBoneWeight(b2, 1 - w)]);
+      case 2:
+      case 4:
+        final bones = [
+          r.readIndex(boneIndexSize, signed: true),
+          r.readIndex(boneIndexSize, signed: true),
+          r.readIndex(boneIndexSize, signed: true),
+          r.readIndex(boneIndexSize, signed: true),
+        ];
+        final weights = [r.readFloat32(), r.readFloat32(), r.readFloat32(), r.readFloat32()];
+        return _cleanWeights([
+          for (var i = 0; i < bones.length; i++) MmdBoneWeight(bones[i], weights[i]),
+        ]);
+      case 3:
+        final b1 = r.readIndex(boneIndexSize, signed: true);
+        final b2 = r.readIndex(boneIndexSize, signed: true);
+        final w = r.readFloat32();
+        r.skipFloat32(9);
+        return _cleanWeights([MmdBoneWeight(b1, w), MmdBoneWeight(b2, 1 - w)]);
+      default:
+        throw Exception('Unsupported PMX weight type $weightType.');
+    }
+  }
+
+  static void _skipPmxMaterial(_Reader r, int textEncoding, int textureIndexSize) {
+    r.readText(textEncoding);
+    r.readText(textEncoding);
+    r.skipFloat32(4);
+    r.skipFloat32(3);
+    r.skipFloat32(1);
+    r.skipFloat32(3);
+    r.readUint8();
+    r.skipFloat32(4);
+    r.skipFloat32(1);
+    r.skipIndex(textureIndexSize);
+    r.skipIndex(textureIndexSize);
+    r.readUint8();
+    final toonFlag = r.readUint8();
+    if (toonFlag == 0) {
+      r.skipIndex(textureIndexSize);
+    } else {
+      r.skip(1);
+    }
+    r.readText(textEncoding);
+    r.readInt32();
+  }
+
+  static _RawBone _readPmxBone(_Reader r, int textEncoding, int boneIndexSize) {
+    final localName = r.readText(textEncoding);
+    final englishName = r.readText(textEncoding);
+    final position = MmdVec3(r.readFloat32(), r.readFloat32(), r.readFloat32());
+    final parentIndex = r.readIndex(boneIndexSize, signed: true);
+    r.readInt32();
+    final flags = r.readUint16();
+
+    if ((flags & 0x0001) != 0) {
+      r.skipIndex(boneIndexSize);
+    } else {
+      r.skipFloat32(3);
+    }
+    if ((flags & 0x0300) != 0) {
+      r.skipIndex(boneIndexSize);
+      r.skipFloat32(1);
+    }
+    if ((flags & 0x0400) != 0) {
+      r.skipFloat32(3);
+    }
+    if ((flags & 0x0800) != 0) {
+      r.skipFloat32(6);
+    }
+    if ((flags & 0x2000) != 0) {
+      r.skip(4);
+    }
+    if ((flags & 0x0020) != 0) {
+      r.skipIndex(boneIndexSize);
+      r.readInt32();
+      r.skipFloat32(1);
+      final linkCount = r.readInt32();
+      for (var i = 0; i < linkCount; i++) {
+        r.skipIndex(boneIndexSize);
+        final hasLimit = r.readUint8();
+        if (hasLimit != 0) {
+          r.skipFloat32(6);
+        }
+      }
+    }
+
+    var canonical = canonicalBoneNameFromText(localName);
+    if (canonical.isEmpty) canonical = canonicalBoneNameFromText(englishName);
+    return _RawBone(name: canonical, parentIndex: parentIndex, position: position);
   }
 }
 
@@ -411,7 +584,7 @@ class PmdParser {
       throw Exception('Invalid PMD vertex count: $vertexCount');
     }
 
-    final vertices = <_Vec3>[];
+    final vertices = <MmdVertex>[];
     double minX = double.infinity;
     double minY = double.infinity;
     double minZ = double.infinity;
@@ -420,21 +593,26 @@ class PmdParser {
     double maxZ = -double.infinity;
 
     for (var i = 0; i < vertexCount; i++) {
-      final x = r.readFloat32();
-      final y = r.readFloat32();
-      final z = r.readFloat32();
-
-      vertices.add(_Vec3(x, y, z));
-      minX = math.min(minX, x);
-      minY = math.min(minY, y);
-      minZ = math.min(minZ, z);
-      maxX = math.max(maxX, x);
-      maxY = math.max(maxY, y);
-      maxZ = math.max(maxZ, z);
+      final position = MmdVec3(r.readFloat32(), r.readFloat32(), r.readFloat32());
+      minX = math.min(minX, position.x);
+      minY = math.min(minY, position.y);
+      minZ = math.min(minZ, position.z);
+      maxX = math.max(maxX, position.x);
+      maxY = math.max(maxY, position.y);
+      maxZ = math.max(maxZ, position.z);
 
       r.skipFloat32(3);
       r.skipFloat32(2);
-      r.skip(6);
+      final b1 = r.readUint16();
+      final b2 = r.readUint16();
+      final weight = r.readUint8() / 100.0;
+      r.skip(1);
+      vertices.add(
+        MmdVertex(
+          bindPosition: position,
+          weights: _cleanWeights([MmdBoneWeight(b1, weight), MmdBoneWeight(b2, 1 - weight)]),
+        ),
+      );
     }
 
     final indexCount = r.readInt32();
@@ -454,10 +632,32 @@ class PmdParser {
       throw Exception('PMD has no drawable indices.');
     }
 
+    final materialCount = r.readInt32();
+    r.skip(materialCount * 70);
+
+    final boneCount = r.readUint16();
+    final rawBones = <_RawBone>[];
+    for (var i = 0; i < boneCount; i++) {
+      final name = decodePmdName(r.readBytes(20));
+      final parent = r.readUint16();
+      r.skip(2);
+      r.skip(1);
+      r.skip(2);
+      final position = MmdVec3(r.readFloat32(), r.readFloat32(), r.readFloat32());
+      rawBones.add(
+        _RawBone(
+          name: name,
+          parentIndex: parent == 0xffff ? -1 : parent,
+          position: position,
+        ),
+      );
+    }
+
     return PmxMesh(
       format: 'PMD',
       vertices: vertices,
       indices: indices,
+      bones: _buildBones(rawBones),
       minX: minX,
       maxX: maxX,
       minY: minY,
@@ -466,6 +666,34 @@ class PmdParser {
       maxZ: maxZ,
     );
   }
+}
+
+List<MmdBoneWeight> _cleanWeights(List<MmdBoneWeight> weights) {
+  final cleaned = weights.where((w) => w.boneIndex >= 0 && w.weight > 0.0001).toList();
+  final total = cleaned.fold<double>(0, (sum, w) => sum + w.weight);
+  if (total <= 0.0001) return const [];
+  return [for (final w in cleaned) MmdBoneWeight(w.boneIndex, w.weight / total)];
+}
+
+List<MmdBone> _buildBones(List<_RawBone> rawBones) {
+  final globals = List<MmdMat4>.filled(rawBones.length, MmdMat4.identity);
+  final bones = <MmdBone>[];
+  for (var i = 0; i < rawBones.length; i++) {
+    final raw = rawBones[i];
+    final parent = raw.parentIndex >= 0 && raw.parentIndex < i ? raw.parentIndex : -1;
+    final localOffset = parent >= 0 ? raw.position - rawBones[parent].position : raw.position;
+    final local = MmdMat4.translationRotation(localOffset, MmdQuat.identity);
+    globals[i] = parent >= 0 ? globals[parent] * local : local;
+    bones.add(
+      MmdBone(
+        canonicalName: raw.name.isEmpty ? 'bone$i' : raw.name,
+        parentIndex: parent,
+        position: raw.position,
+        inverseBind: globals[i].inverseRigid(),
+      ),
+    );
+  }
+  return bones;
 }
 
 class _Reader {
@@ -481,10 +709,10 @@ class _Reader {
     return v;
   }
 
-  int readInt32() {
-    _check(4);
-    final v = data.getInt32(offset, Endian.little);
-    offset += 4;
+  int readInt8() {
+    _check(1);
+    final v = data.getInt8(offset);
+    offset += 1;
     return v;
   }
 
@@ -492,6 +720,20 @@ class _Reader {
     _check(2);
     final v = data.getUint16(offset, Endian.little);
     offset += 2;
+    return v;
+  }
+
+  int readInt16() {
+    _check(2);
+    final v = data.getInt16(offset, Endian.little);
+    offset += 2;
+    return v;
+  }
+
+  int readInt32() {
+    _check(4);
+    final v = data.getInt32(offset, Endian.little);
+    offset += 4;
     return v;
   }
 
@@ -509,6 +751,40 @@ class _Reader {
     return out;
   }
 
+  String readText(int encoding) {
+    final length = readInt32();
+    if (length < 0) throw Exception('Invalid PMX text length.');
+    final bytes = readBytes(length);
+    if (encoding == 0) return _decodeUtf16Le(bytes);
+    return utf8.decode(bytes, allowMalformed: true);
+  }
+
+  int readIndex(int size, {required bool signed}) {
+    switch (size) {
+      case 1:
+        return signed ? readInt8() : readUint8();
+      case 2:
+        return signed ? readInt16() : readUint16();
+      case 4:
+        return readInt32();
+      default:
+        throw Exception('Unsupported PMX index size $size.');
+    }
+  }
+
+  int readVertexIndex(int size) {
+    switch (size) {
+      case 1:
+        return readUint8();
+      case 2:
+        return readUint16();
+      case 4:
+        return readInt32();
+      default:
+        throw Exception('Unsupported vertex index size $size.');
+    }
+  }
+
   void skip(int length) {
     _check(length);
     offset += length;
@@ -517,51 +793,36 @@ class _Reader {
   void skipFloat32(int count) => skip(count * 4);
   void skipIndex(int size) => skip(size);
 
-  void skipText(int encoding) {
-    final length = readInt32();
-    if (length < 0) throw Exception('Invalid PMX text length.');
-    skip(length);
-  }
-
-  int readVertexIndex(int size) {
-    switch (size) {
-      case 1:
-        _check(1);
-        final v = data.getUint8(offset);
-        offset += 1;
-        return v;
-      case 2:
-        _check(2);
-        final v = data.getUint16(offset, Endian.little);
-        offset += 2;
-        return v;
-      case 4:
-        _check(4);
-        final v = data.getInt32(offset, Endian.little);
-        offset += 4;
-        return v;
-      default:
-        throw Exception('Unsupported vertex index size $size.');
-    }
-  }
-
   void _check(int length) {
     if (offset + length > data.lengthInBytes) {
-      throw Exception('Unexpected end of PMX data at $offset.');
+      throw Exception('Unexpected end of model data at $offset.');
     }
   }
 }
 
+String _decodeUtf16Le(Uint8List bytes) {
+  final codes = <int>[];
+  for (var i = 0; i + 1 < bytes.length; i += 2) {
+    codes.add(bytes[i] | (bytes[i + 1] << 8));
+  }
+  return String.fromCharCodes(codes);
+}
 
 class PmxMeshPainter extends CustomPainter {
   PmxMeshPainter({
     required this.mesh,
+    required this.motion,
+    required this.camera,
+    required this.playheadMs,
     required this.orbitX,
     required this.orbitY,
     required this.zoom,
   });
 
   final PmxMesh mesh;
+  final VmdData? motion;
+  final VmdData? camera;
+  final int playheadMs;
   final double orbitX;
   final double orbitY;
   final double zoom;
@@ -569,6 +830,10 @@ class PmxMeshPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (mesh.vertices.isEmpty || mesh.indices.length < 3) return;
+
+    final frame = playheadMs * 30.0 / 1000.0;
+    final cameraFrame = camera?.sampleCamera(frame);
+    final animated = _animatedVertices(frame);
 
     final centerX = (mesh.minX + mesh.maxX) * .5;
     final centerY = (mesh.minY + mesh.maxY) * .5;
@@ -578,18 +843,29 @@ class PmxMeshPainter extends CustomPainter {
     final height = math.max(.001, mesh.maxY - mesh.minY);
     final depth = math.max(.001, mesh.maxZ - mesh.minZ);
     final maxDim = math.max(width, math.max(height, depth));
-    final scale = math.min(size.width, size.height) * .70 / maxDim * zoom;
 
-    final yaw = orbitX * math.pi / 180.0;
-    final pitch = orbitY * math.pi / 180.0;
+    var viewOrbitX = orbitX;
+    var viewOrbitY = orbitY;
+    var viewZoom = zoom;
+    if (cameraFrame != null) {
+      viewOrbitX += -cameraFrame.rotation.y * 180 / math.pi;
+      viewOrbitY += cameraFrame.rotation.x * 180 / math.pi;
+      final distanceZoom = (45 / math.max(10, cameraFrame.distance.abs())).clamp(.35, 3.2).toDouble();
+      final fovZoom = (45 / math.max(15, cameraFrame.fov)).clamp(.5, 2.4).toDouble();
+      viewZoom *= distanceZoom * fovZoom;
+    }
+
+    final scale = math.min(size.width, size.height) * .70 / maxDim * viewZoom;
+    final yaw = viewOrbitX * math.pi / 180.0;
+    final pitch = viewOrbitY * math.pi / 180.0;
     final cy = math.cos(yaw);
     final sy = math.sin(yaw);
     final cx = math.cos(pitch);
     final sx = math.sin(pitch);
 
-    final projected = List<Offset>.filled(mesh.vertices.length, Offset.zero);
-    for (var i = 0; i < mesh.vertices.length; i++) {
-      final v = mesh.vertices[i];
+    final projected = List<Offset>.filled(animated.length, Offset.zero);
+    for (var i = 0; i < animated.length; i++) {
+      final v = animated[i];
       final x = v.x - centerX;
       final y = v.y - centerY;
       final z = v.z - centerZ;
@@ -635,9 +911,52 @@ class PmxMeshPainter extends CustomPainter {
     }
   }
 
+  List<MmdVec3> _animatedVertices(double frame) {
+    final currentMotion = motion;
+    if (currentMotion == null || !currentMotion.hasBoneMotion || mesh.bones.isEmpty) {
+      return [for (final vertex in mesh.vertices) vertex.bindPosition];
+    }
+
+    final globals = List<MmdMat4>.filled(mesh.bones.length, MmdMat4.identity);
+    for (var i = 0; i < mesh.bones.length; i++) {
+      final bone = mesh.bones[i];
+      final parent = bone.parentIndex;
+      final parentPosition = parent >= 0 ? mesh.bones[parent].position : MmdVec3.zero;
+      final baseOffset = parent >= 0 ? bone.position - parentPosition : bone.position;
+      final pose = currentMotion.sampleBone(bone.canonicalName, frame);
+      final local = MmdMat4.translationRotation(
+        baseOffset + (pose?.translation ?? MmdVec3.zero),
+        pose?.rotation ?? MmdQuat.identity,
+      );
+      globals[i] = parent >= 0 ? globals[parent] * local : local;
+    }
+
+    return [
+      for (final vertex in mesh.vertices)
+        _skinVertex(vertex, globals),
+    ];
+  }
+
+  MmdVec3 _skinVertex(MmdVertex vertex, List<MmdMat4> globals) {
+    if (vertex.weights.isEmpty) return vertex.bindPosition;
+    var out = MmdVec3.zero;
+    var total = 0.0;
+    for (final weight in vertex.weights) {
+      if (weight.boneIndex < 0 || weight.boneIndex >= mesh.bones.length) continue;
+      final skin = globals[weight.boneIndex] * mesh.bones[weight.boneIndex].inverseBind;
+      out = out + skin.transform(vertex.bindPosition) * weight.weight;
+      total += weight.weight;
+    }
+    if (total <= 0.0001) return vertex.bindPosition;
+    return out * (1 / total);
+  }
+
   @override
   bool shouldRepaint(covariant PmxMeshPainter oldDelegate) {
     return oldDelegate.mesh != mesh ||
+        oldDelegate.motion != motion ||
+        oldDelegate.camera != camera ||
+        oldDelegate.playheadMs != playheadMs ||
         oldDelegate.orbitX != orbitX ||
         oldDelegate.orbitY != orbitY ||
         oldDelegate.zoom != zoom;

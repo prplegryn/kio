@@ -17,6 +17,14 @@ class MainActivity : FlutterActivity() {
                     } catch (error: Throwable) {
                         result.error("CRASH_LOG_WRITE_FAILED", error.message, null)
                     }
+                } else if (call.method == "writeExportZip") {
+                    val fileName = call.argument<String>("fileName") ?: "kio_export.zip"
+                    val bytes = call.argument<ByteArray>("bytes") ?: ByteArray(0)
+                    try {
+                        result.success(CrashFileWriter.writeExportZip(this, fileName, bytes))
+                    } catch (error: Throwable) {
+                        result.error("EXPORT_WRITE_FAILED", error.message, null)
+                    }
                 } else {
                     result.notImplemented()
                 }
