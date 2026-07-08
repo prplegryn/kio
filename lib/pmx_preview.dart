@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
@@ -23,6 +24,7 @@ class PmxPreview extends StatefulWidget {
     required this.zoom,
     required this.playheadMs,
     this.showStatus = true,
+    this.onDebugLog,
   });
 
   final KioAsset? asset;
@@ -34,6 +36,7 @@ class PmxPreview extends StatefulWidget {
   final double zoom;
   final int playheadMs;
   final bool showStatus;
+  final ValueChanged<String>? onDebugLog;
 
   @override
   State<PmxPreview> createState() => _PmxPreviewState();
@@ -44,6 +47,7 @@ class _PmxPreviewState extends State<PmxPreview> {
   VmdData? motion;
   VmdData? face;
   VmdData? camera;
+  Map<String, ui.Image> textures = const {};
   String? loadingKey;
   String? status;
   bool statusIsError = false;
@@ -52,6 +56,12 @@ class _PmxPreviewState extends State<PmxPreview> {
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _disposeTextures();
+    super.dispose();
   }
 
   @override
@@ -74,6 +84,8 @@ class _PmxPreviewState extends State<PmxPreview> {
         motion = null;
         face = null;
         camera = null;
+        _disposeTextures();
+        textures = const {};
         loadingKey = null;
         status = 'No model selected';
         statusIsError = false;
@@ -86,6 +98,8 @@ class _PmxPreviewState extends State<PmxPreview> {
       motion = null;
       face = null;
       camera = null;
+      _disposeTextures();
+      textures = const {};
       loadingKey = key;
       status = 'Loading ${asset.displayName}...';
       statusIsError = false;
@@ -98,13 +112,16 @@ class _PmxPreviewState extends State<PmxPreview> {
       }
 
       final parsedMesh = await compute(_parseMmdMesh, payload.bytes);
+      final parsedTextures = await _loadTextures(asset, payload, parsedMesh);
       final parsedMotion = await _loadVmd(widget.motionAsset);
       final parsedFace = await _loadVmd(widget.faceAsset);
       final parsedCamera = await _loadVmd(widget.cameraAsset);
       if (!mounted || loadingKey != key) return;
 
+      _disposeTextures();
       setState(() {
         mesh = parsedMesh;
+        textures = parsedTextures;
         motion = parsedMotion;
         face = parsedFace;
         camera = parsedCamera;
@@ -118,16 +135,88 @@ class _PmxPreviewState extends State<PmxPreview> {
         motion = null;
         face = null;
         camera = null;
+        _disposeTextures();
+        textures = const {};
         status = error.toString().replaceFirst('Exception: ', '');
         statusIsError = true;
       });
+      widget.onDebugLog?.call('Model load: failed ${asset.displayName}: $error');
     }
   }
 
   Future<VmdData?> _loadVmd(KioAsset? asset) async {
     if (asset == null) return null;
     if (!asset.localPath.toLowerCase().endsWith('.vmd')) return null;
-    return compute(_parseVmd, await File(asset.localPath).readAsBytes());
+    final data = await compute(_parseVmd, await File(asset.localPath).readAsBytes());
+    widget.onDebugLog?.call(
+      'VMD load: ${asset.displayName} bones=${data.boneFrames.length} morphs=${data.morphFrameCount} cameras=${data.cameraFrames.length} duration=${data.durationMs}ms',
+    );
+    return data;
+  }
+
+  Future<Map<String, ui.Image>> _loadTextures(KioAsset asset, _PmxPayload payload, PmxMesh mesh) async {
+    final textureNames = mesh.materials
+        .map((material) => material.texturePath)
+        .whereType<String>()
+        .where((path) => path.trim().isNotEmpty)
+        .toSet()
+        .toList();
+    if (textureNames.isEmpty) {
+      widget.onDebugLog?.call('Model load: ${asset.displayName} has no material textures; using diffuse colors');
+      return const {};
+    }
+
+    final modelDir = File(payload.name).existsSync() ? File(payload.name).parent : Directory(asset.localPath);
+    final assetDir = Directory(asset.localPath);
+    final loaded = <String, ui.Image>{};
+    var missing = 0;
+    for (final textureName in textureNames) {
+      final file = _resolveTextureFile(textureName, modelDir, assetDir);
+      if (file == null) {
+        missing++;
+        widget.onDebugLog?.call('Texture missing: $textureName');
+        continue;
+      }
+      try {
+        final codec = await ui.instantiateImageCodec(await file.readAsBytes());
+        final frame = await codec.getNextFrame();
+        loaded[textureName] = frame.image;
+      } catch (error) {
+        missing++;
+        widget.onDebugLog?.call('Texture failed: $textureName ($error)');
+      }
+    }
+    widget.onDebugLog?.call(
+      'Model load: ${asset.displayName} vertices=${mesh.vertices.length} materials=${mesh.materials.length} textures=${loaded.length}/${textureNames.length} missing=$missing',
+    );
+    return loaded;
+  }
+
+  File? _resolveTextureFile(String textureName, Directory modelDir, Directory assetDir) {
+    final safe = p.posix.normalize(textureName.replaceAll('\\', '/'));
+    final candidates = [
+      File(p.join(modelDir.path, safe)),
+      File(p.join(assetDir.path, safe)),
+      File(p.join(assetDir.path, p.basename(safe))),
+    ];
+    for (final candidate in candidates) {
+      if (candidate.existsSync()) return candidate;
+    }
+
+    final basename = p.basename(safe).toLowerCase();
+    if (!assetDir.existsSync()) return null;
+    for (final entity in assetDir.listSync(recursive: true, followLinks: false)) {
+      if (entity is File && p.basename(entity.path).toLowerCase() == basename) {
+        return entity;
+      }
+    }
+    return null;
+  }
+
+  void _disposeTextures() {
+    for (final image in textures.values) {
+      image.dispose();
+    }
   }
 
   String _statusFor(PmxMesh mesh, VmdData? motion, VmdData? face, VmdData? camera) {
@@ -246,6 +335,7 @@ class _PmxPreviewState extends State<PmxPreview> {
               mesh: current,
               motion: motion,
               camera: camera,
+              textures: textures,
               playheadMs: widget.playheadMs,
               orbitX: widget.orbitX,
               orbitY: widget.orbitY,
@@ -324,18 +414,27 @@ class PmxMesh {
 }
 
 class MmdMaterial {
-  const MmdMaterial({required this.color, required this.indexStart, required this.indexCount});
+  const MmdMaterial({required this.colorValue, required this.indexStart, required this.indexCount, this.texturePath});
 
-  final Color color;
+  final int colorValue;
   final int indexStart;
   final int indexCount;
+  final String? texturePath;
 }
 
 class MmdVertex {
-  MmdVertex({required this.bindPosition, required this.weights});
+  MmdVertex({required this.bindPosition, required this.uv, required this.weights});
 
   final MmdVec3 bindPosition;
+  final MmdUv uv;
   final List<MmdBoneWeight> weights;
+}
+
+class MmdUv {
+  const MmdUv(this.u, this.v);
+
+  final double u;
+  final double v;
 }
 
 class MmdBoneWeight {
@@ -439,12 +538,12 @@ class PmxParser {
       maxZ = math.max(maxZ, position.z);
 
       r.skipFloat32(3);
-      r.skipFloat32(2);
+      final uv = MmdUv(r.readFloat32(), r.readFloat32());
       r.skipFloat32(additionalUv * 4);
 
       final weights = _readPmxWeights(r, boneIndexSize);
       r.skipFloat32(1);
-      vertices.add(MmdVertex(bindPosition: position, weights: weights));
+      vertices.add(MmdVertex(bindPosition: position, uv: uv, weights: weights));
     }
 
     final indexCount = r.readInt32();
@@ -465,15 +564,16 @@ class PmxParser {
     }
 
     final textureCount = r.readInt32();
+    final texturePaths = <String>[];
     for (var i = 0; i < textureCount; i++) {
-      r.readText(textEncoding);
+      texturePaths.add(r.readText(textEncoding));
     }
 
     final materialCount = r.readInt32();
     final materials = <MmdMaterial>[];
     var materialIndexStart = 0;
     for (var i = 0; i < materialCount; i++) {
-      final material = _readPmxMaterial(r, textEncoding, textureIndexSize, materialIndexStart);
+      final material = _readPmxMaterial(r, textEncoding, textureIndexSize, texturePaths, materialIndexStart);
       materials.add(material);
       materialIndexStart += material.indexCount;
     }
@@ -532,7 +632,13 @@ class PmxParser {
     }
   }
 
-  static MmdMaterial _readPmxMaterial(_Reader r, int textEncoding, int textureIndexSize, int indexStart) {
+  static MmdMaterial _readPmxMaterial(
+    _Reader r,
+    int textEncoding,
+    int textureIndexSize,
+    List<String> texturePaths,
+    int indexStart,
+  ) {
     r.readText(textEncoding);
     r.readText(textEncoding);
     final red = r.readFloat32();
@@ -545,7 +651,7 @@ class PmxParser {
     r.readUint8();
     r.skipFloat32(4);
     r.skipFloat32(1);
-    r.skipIndex(textureIndexSize);
+    final textureIndex = r.readIndex(textureIndexSize, signed: true);
     r.skipIndex(textureIndexSize);
     r.readUint8();
     final toonFlag = r.readUint8();
@@ -557,9 +663,10 @@ class PmxParser {
     r.readText(textEncoding);
     final indexCount = r.readInt32();
     return MmdMaterial(
-      color: _materialColor(red, green, blue, alpha),
+      colorValue: _materialColorValue(red, green, blue, alpha),
       indexStart: indexStart,
       indexCount: indexCount,
+      texturePath: textureIndex >= 0 && textureIndex < texturePaths.length ? texturePaths[textureIndex] : null,
     );
   }
 
@@ -645,7 +752,7 @@ class PmdParser {
       maxZ = math.max(maxZ, position.z);
 
       r.skipFloat32(3);
-      r.skipFloat32(2);
+      final uv = MmdUv(r.readFloat32(), r.readFloat32());
       final b1 = r.readUint16();
       final b2 = r.readUint16();
       final weight = r.readUint8() / 100.0;
@@ -653,6 +760,7 @@ class PmdParser {
       vertices.add(
         MmdVertex(
           bindPosition: position,
+          uv: uv,
           weights: _cleanWeights([MmdBoneWeight(b1, weight), MmdBoneWeight(b2, 1 - weight)]),
         ),
       );
@@ -689,12 +797,13 @@ class PmdParser {
       r.skip(1);
       r.skip(1);
       final indexCount = r.readInt32();
-      r.skip(20);
+      final texturePath = _trimPmdTextureName(r.readBytes(20));
       materials.add(
         MmdMaterial(
-          color: _materialColor(red, green, blue, alpha),
+          colorValue: _materialColorValue(red, green, blue, alpha),
           indexStart: materialIndexStart,
           indexCount: indexCount,
+          texturePath: texturePath.isEmpty ? null : texturePath,
         ),
       );
       materialIndexStart += indexCount;
@@ -742,16 +851,26 @@ List<MmdBoneWeight> _cleanWeights(List<MmdBoneWeight> weights) {
 }
 
 List<MmdMaterial> _defaultMaterials(int indexCount) {
-  return [MmdMaterial(color: const Color(0xFFB8C3FF), indexStart: 0, indexCount: indexCount)];
+  return [MmdMaterial(colorValue: 0xFFB8C3FF, indexStart: 0, indexCount: indexCount)];
 }
 
-Color _materialColor(double red, double green, double blue, double alpha) {
+String _trimPmdTextureName(Uint8List bytes) {
+  final useful = bytes.takeWhile((value) => value != 0).toList();
+  if (useful.isEmpty) return '';
+  String clean(String value) => value.split('*').first.trim();
+  if (useful.every((value) => value >= 0x20 && value <= 0x7e)) {
+    return clean(String.fromCharCodes(useful));
+  }
+  return clean(String.fromCharCodes(useful.where((value) => value >= 0x20 && value <= 0x7e)));
+}
+
+int _materialColorValue(double red, double green, double blue, double alpha) {
   int channel(double value) {
     return (value.clamp(0.0, 1.0) * 255).round().clamp(0, 255).toInt();
   }
 
   final a = channel(alpha).clamp(80, 255).toInt();
-  return Color.fromARGB(a, channel(red), channel(green), channel(blue));
+  return (a << 24) | (channel(red) << 16) | (channel(green) << 8) | channel(blue);
 }
 
 List<MmdBone> _buildBones(List<_RawBone> rawBones) {
@@ -892,6 +1011,7 @@ class PmxMeshPainter extends CustomPainter {
     required this.mesh,
     required this.motion,
     required this.camera,
+    required this.textures,
     required this.playheadMs,
     required this.orbitX,
     required this.orbitY,
@@ -901,6 +1021,7 @@ class PmxMeshPainter extends CustomPainter {
   final PmxMesh mesh;
   final VmdData? motion;
   final VmdData? camera;
+  final Map<String, ui.Image> textures;
   final int playheadMs;
   final double orbitX;
   final double orbitY;
@@ -959,32 +1080,95 @@ class PmxMeshPainter extends CustomPainter {
       );
     }
 
-    final fill = Paint()..style = PaintingStyle.fill;
-    final triangleCount = mesh.indices.length ~/ 3;
-    final step = math.max(1, triangleCount ~/ 6000);
-
     for (final material in mesh.materials) {
       final start = material.indexStart.clamp(0, mesh.indices.length).toInt();
       final end = (material.indexStart + material.indexCount).clamp(start, mesh.indices.length).toInt();
       if (end - start < 3) continue;
 
-      final path = Path();
-      for (var i = start; i + 2 < end; i += 3 * step) {
-        final a = mesh.indices[i];
-        final b = mesh.indices[i + 1];
-        final c = mesh.indices[i + 2];
-
-        if (a >= projected.length || b >= projected.length || c >= projected.length) continue;
-
-        path
-          ..moveTo(projected[a].dx, projected[a].dy)
-          ..lineTo(projected[b].dx, projected[b].dy)
-          ..lineTo(projected[c].dx, projected[c].dy)
-          ..close();
-      }
-      fill.color = material.color;
-      canvas.drawPath(path, fill);
+      final image = material.texturePath == null ? null : textures[material.texturePath!];
+      _drawMaterial(canvas, projected, material, start, end, image);
     }
+  }
+
+  void _drawMaterial(
+    Canvas canvas,
+    List<Offset> projected,
+    MmdMaterial material,
+    int start,
+    int end,
+    ui.Image? image,
+  ) {
+    const maxBatchVertices = 48000;
+    final positions = <Offset>[];
+    final textureCoordinates = image == null ? null : <Offset>[];
+    final paint = Paint()
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = false
+      ..filterQuality = FilterQuality.low;
+
+    if (image == null) {
+      paint.color = Color(material.colorValue);
+    } else {
+      paint.shader = ui.ImageShader(
+        image,
+        ui.TileMode.clamp,
+        ui.TileMode.clamp,
+        Float64List.fromList(const [
+          1.0, 0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0, 0.0,
+          0.0, 0.0, 1.0, 0.0,
+          0.0, 0.0, 0.0, 1.0,
+        ]),
+      );
+    }
+
+    void addVertex(int index) {
+      positions.add(projected[index]);
+      if (image != null) {
+        textureCoordinates!.add(_uvToImageOffset(mesh.vertices[index].uv, image));
+      }
+    }
+
+    for (var i = start; i + 2 < end; i += 3) {
+      final a = mesh.indices[i];
+      final b = mesh.indices[i + 1];
+      final c = mesh.indices[i + 2];
+
+      if (a >= projected.length || b >= projected.length || c >= projected.length) continue;
+      addVertex(a);
+      addVertex(b);
+      addVertex(c);
+
+      if (positions.length >= maxBatchVertices) {
+        _flushVertices(canvas, positions, textureCoordinates, paint);
+      }
+    }
+
+    _flushVertices(canvas, positions, textureCoordinates, paint);
+  }
+
+  Offset _uvToImageOffset(MmdUv uv, ui.Image image) {
+    return Offset(uv.u * image.width, uv.v * image.height);
+  }
+
+  void _flushVertices(
+    Canvas canvas,
+    List<Offset> positions,
+    List<Offset>? textureCoordinates,
+    Paint paint,
+  ) {
+    if (positions.length < 3) return;
+    canvas.drawVertices(
+      ui.Vertices(
+        ui.VertexMode.triangles,
+        List<Offset>.of(positions),
+        textureCoordinates: textureCoordinates == null ? null : List<Offset>.of(textureCoordinates),
+      ),
+      BlendMode.srcOver,
+      paint,
+    );
+    positions.clear();
+    textureCoordinates?.clear();
   }
 
   List<MmdVec3> _animatedVertices(double frame) {
@@ -1054,6 +1238,7 @@ class PmxMeshPainter extends CustomPainter {
     return oldDelegate.mesh != mesh ||
         oldDelegate.motion != motion ||
         oldDelegate.camera != camera ||
+        oldDelegate.textures != textures ||
         oldDelegate.playheadMs != playheadMs ||
         oldDelegate.orbitX != orbitX ||
         oldDelegate.orbitY != orbitY ||

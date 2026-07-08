@@ -78,6 +78,7 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   String? visibleProjectId;
   String? loadedMusicId;
   String? exportStatus;
+  final debugLogs = <String>[];
   bool drawerOpen = false;
   bool importOpen = false;
   bool presetOpen = false;
@@ -142,6 +143,7 @@ class _KioWorkspaceState extends State<KioWorkspace> {
                 showOverlays: !exporting,
                 onCameraChanged: _updateCamera,
                 onCameraChangeEnd: _flushCamera,
+                onDebugLog: _logDebug,
               ),
             ),
           ),
@@ -161,6 +163,7 @@ class _KioWorkspaceState extends State<KioWorkspace> {
             onApplyPreset: (preset) => unawaited(store.applyCameraPreset(preset.id)),
             onResetPreset: _resetPreset,
             onExport: _exportFrames,
+            onShowLogs: _showDebugLogs,
           ),
           _BottomPlayback(
             project: project,
@@ -208,13 +211,21 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   }
 
   Future<void> _importAsset(KioAssetType type) async {
+    _logDebug('Import ${type.label}: opening picker');
     try {
       final result = await store.importAssetToLibrary(type);
       if (!mounted || result == null) return;
+      _logDebug(
+        result.isDuplicate
+            ? 'Import ${type.label}: duplicate ${result.asset.displayName} path=${result.asset.localPath}'
+            : 'Import ${type.label}: imported ${result.asset.displayName} path=${result.asset.localPath} duration=${result.asset.durationMs}ms',
+      );
       _toast(result.isDuplicate ? '${result.asset.displayName} already exists.' : '${result.asset.displayName} imported.');
     } on AssetImportException catch (e) {
+      _logDebug('Import ${type.label}: failed ${e.message}');
       _toast(e.message);
     } catch (e, s) {
+      _logDebug('Import ${type.label}: crashed $e');
       await CrashLogService.writeError(e, s, origin: 'asset-import');
       _toast('Import failed. Crash log saved.');
     }
@@ -234,6 +245,7 @@ class _KioWorkspaceState extends State<KioWorkspace> {
     setState(() => importOpen = false);
     if (picked != null) {
       await store.attachAssetToSelectedProject(picked);
+      _logDebug('Apply ${picked.type.label}: ${picked.displayName} to ${store.selectedProject.name}');
       _toast('${picked.displayName} applied to ${store.selectedProject.name}.');
     }
   }
@@ -241,6 +253,7 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   Future<void> _applyAsset(KioAsset asset) async {
     await store.attachAssetToSelectedProject(asset);
     if (!mounted) return;
+    _logDebug('Apply ${asset.type.label}: ${asset.displayName} to ${store.selectedProject.name}');
     setState(() => drawerOpen = false);
     _toast('${asset.displayName} applied to ${store.selectedProject.name}.');
   }
@@ -456,8 +469,10 @@ class _KioWorkspaceState extends State<KioWorkspace> {
       if (zipBytes == null) throw Exception('Unable to build ZIP.');
       final now = DateTime.now().toIso8601String().replaceAll(':', '-');
       final path = await ExportService.writeZip('kio_export_$now.zip', Uint8List.fromList(zipBytes));
+      _logDebug('Export: saved $frameCount frames at ${fps}fps to $path');
       _toast('Export saved: $path');
     } catch (error, stack) {
+      _logDebug('Export: failed $error');
       await CrashLogService.writeError(error, stack, origin: 'frame-export');
       _toast('Export failed. Crash log saved.');
     } finally {
@@ -475,6 +490,42 @@ class _KioWorkspaceState extends State<KioWorkspace> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating));
   }
+
+  void _logDebug(String message) {
+    final time = DateTime.now().toIso8601String().split('T').last.split('.').first;
+    debugLogs.add('[$time] $message');
+    if (debugLogs.length > 240) {
+      debugLogs.removeRange(0, debugLogs.length - 240);
+    }
+  }
+
+  Future<void> _showDebugLogs() async {
+    final text = debugLogs.isEmpty ? 'No import/apply logs yet.' : debugLogs.join('\n');
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: KioColors.panel,
+        title: const Text('Import / Apply Logs'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: SelectableText(text, style: const TextStyle(fontSize: 11, height: 1.35)),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+          FilledButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              Navigator.pop(context);
+              _toast('Logs copied.');
+            },
+            child: const Text('Copy'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _PlayerCanvas extends StatefulWidget {
@@ -488,6 +539,7 @@ class _PlayerCanvas extends StatefulWidget {
     required this.showOverlays,
     required this.onCameraChanged,
     required this.onCameraChangeEnd,
+    required this.onDebugLog,
   });
 
   final KioProject project;
@@ -499,6 +551,7 @@ class _PlayerCanvas extends StatefulWidget {
   final bool showOverlays;
   final void Function(Offset delta, double scale) onCameraChanged;
   final VoidCallback onCameraChangeEnd;
+  final ValueChanged<String> onDebugLog;
 
   @override
   State<_PlayerCanvas> createState() => _PlayerCanvasState();
@@ -544,6 +597,7 @@ class _PlayerCanvasState extends State<_PlayerCanvas> {
             zoom: widget.zoom,
             playheadMs: widget.playheadMs,
             showStatus: widget.showOverlays,
+            onDebugLog: widget.onDebugLog,
           ),
         ],
       ),
@@ -592,6 +646,7 @@ class _RightControls extends StatelessWidget {
     required this.onApplyPreset,
     required this.onResetPreset,
     required this.onExport,
+    required this.onShowLogs,
   });
 
   final KioProject project;
@@ -604,6 +659,7 @@ class _RightControls extends StatelessWidget {
   final void Function(CameraPreset preset) onApplyPreset;
   final void Function(CameraPreset preset) onResetPreset;
   final VoidCallback onExport;
+  final VoidCallback onShowLogs;
 
   @override
   Widget build(BuildContext context) {
@@ -638,6 +694,8 @@ class _RightControls extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           _IconTile(icon: Icons.file_download_rounded, label: 'Export', onTap: onExport),
+          const SizedBox(height: 8),
+          _IconTile(icon: Icons.bug_report_rounded, label: 'Logs', onTap: onShowLogs),
         ],
       ),
     );
