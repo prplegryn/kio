@@ -1,67 +1,42 @@
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
 enum KioAssetType { model, motion, music, camera }
 
 extension KioAssetTypeX on KioAssetType {
-  String get label {
-    switch (this) {
-      case KioAssetType.model:
-        return 'Model';
-      case KioAssetType.motion:
-        return 'Motion';
-      case KioAssetType.music:
-        return 'Music';
-      case KioAssetType.camera:
-        return 'Camera';
-    }
-  }
+  String get label => switch (this) {
+        KioAssetType.model => 'Model',
+        KioAssetType.motion => 'Motion',
+        KioAssetType.music => 'Music',
+        KioAssetType.camera => 'Camera',
+      };
 
-  String get directoryName {
-    switch (this) {
-      case KioAssetType.model:
-        return 'models';
-      case KioAssetType.motion:
-        return 'motions';
-      case KioAssetType.music:
-        return 'music';
-      case KioAssetType.camera:
-        return 'cameras';
-    }
-  }
+  String get dir => switch (this) {
+        KioAssetType.model => 'models',
+        KioAssetType.motion => 'motions',
+        KioAssetType.music => 'music',
+        KioAssetType.camera => 'cameras',
+      };
 
-  IconData get icon {
-    switch (this) {
-      case KioAssetType.model:
-        return Icons.view_in_ar_rounded;
-      case KioAssetType.motion:
-        return Icons.directions_run_rounded;
-      case KioAssetType.music:
-        return Icons.music_note_rounded;
-      case KioAssetType.camera:
-        return Icons.videocam_rounded;
-    }
-  }
+  IconData get icon => switch (this) {
+        KioAssetType.model => Icons.view_in_ar_rounded,
+        KioAssetType.motion => Icons.directions_run_rounded,
+        KioAssetType.music => Icons.music_note_rounded,
+        KioAssetType.camera => Icons.videocam_rounded,
+      };
 
-  List<String> get extensions {
-    switch (this) {
-      case KioAssetType.model:
-        return const ['pmx', 'pmd', 'zip'];
-      case KioAssetType.motion:
-        return const ['vmd', 'nmd'];
-      case KioAssetType.music:
-        return const ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'];
-      case KioAssetType.camera:
-        return const ['vmd', 'nmd'];
-    }
-  }
+  List<String> get extensions => switch (this) {
+        KioAssetType.model => const ['zip'],
+        KioAssetType.motion => const ['vmd', 'nmd'],
+        KioAssetType.music => const ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'],
+        KioAssetType.camera => const ['vmd', 'nmd'],
+      };
 
   static KioAssetType fromName(String name) {
-    return KioAssetType.values.firstWhere(
-      (type) => type.name == name,
-      orElse: () => KioAssetType.model,
-    );
+    for (final type in KioAssetType.values) {
+      if (type.name == name) return type;
+    }
+    return KioAssetType.model;
   }
 }
 
@@ -71,68 +46,55 @@ class KioAsset {
     required this.type,
     required this.displayName,
     required this.originalName,
-    required this.fileName,
     required this.localPath,
     required this.sha256,
     required this.importedAt,
+    this.entryFile,
   });
 
   final String id;
   final KioAssetType type;
   final String displayName;
   final String originalName;
-  final String fileName;
   final String localPath;
   final String sha256;
   final DateTime importedAt;
+  final String? entryFile;
 
-  KioAsset copyWith({
-    String? id,
-    KioAssetType? type,
-    String? displayName,
-    String? originalName,
-    String? fileName,
-    String? localPath,
-    String? sha256,
-    DateTime? importedAt,
-  }) {
+  KioAsset copyWith({String? displayName}) {
     return KioAsset(
-      id: id ?? this.id,
-      type: type ?? this.type,
+      id: id,
+      type: type,
       displayName: displayName ?? this.displayName,
-      originalName: originalName ?? this.originalName,
-      fileName: fileName ?? this.fileName,
-      localPath: localPath ?? this.localPath,
-      sha256: sha256 ?? this.sha256,
-      importedAt: importedAt ?? this.importedAt,
+      originalName: originalName,
+      localPath: localPath,
+      sha256: sha256,
+      importedAt: importedAt,
+      entryFile: entryFile,
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'type': type.name,
-      'displayName': displayName,
-      'originalName': originalName,
-      'fileName': fileName,
-      'localPath': localPath,
-      'sha256': sha256,
-      'importedAt': importedAt.toIso8601String(),
-    };
-  }
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'type': type.name,
+        'displayName': displayName,
+        'originalName': originalName,
+        'localPath': localPath,
+        'sha256': sha256,
+        'importedAt': importedAt.toIso8601String(),
+        'entryFile': entryFile,
+      };
 
-  factory KioAsset.fromJson(Map<String, dynamic> json) {
-    return KioAsset(
-      id: json['id'] as String,
-      type: KioAssetTypeX.fromName(json['type'] as String),
-      displayName: json['displayName'] as String,
-      originalName: json['originalName'] as String,
-      fileName: json['fileName'] as String,
-      localPath: json['localPath'] as String,
-      sha256: json['sha256'] as String,
-      importedAt: DateTime.parse(json['importedAt'] as String),
-    );
-  }
+  factory KioAsset.fromJson(Map<String, dynamic> json) => KioAsset(
+        id: json['id'] as String,
+        type: KioAssetTypeX.fromName(json['type'] as String),
+        displayName: json['displayName'] as String,
+        originalName: json['originalName'] as String,
+        localPath: json['localPath'] as String,
+        sha256: json['sha256'] as String,
+        importedAt: DateTime.parse(json['importedAt'] as String),
+        entryFile: json['entryFile'] as String?,
+      );
 }
 
 class CameraPreset {
@@ -152,45 +114,34 @@ class CameraPreset {
   final double zoom;
   final DateTime createdAt;
 
-  CameraPreset copyWith({
-    String? id,
-    String? name,
-    double? orbitX,
-    double? orbitY,
-    double? zoom,
-    DateTime? createdAt,
-  }) {
+  CameraPreset copyWith({double? orbitX, double? orbitY, double? zoom}) {
     return CameraPreset(
-      id: id ?? this.id,
-      name: name ?? this.name,
+      id: id,
+      name: name,
       orbitX: orbitX ?? this.orbitX,
       orbitY: orbitY ?? this.orbitY,
       zoom: zoom ?? this.zoom,
-      createdAt: createdAt ?? this.createdAt,
+      createdAt: createdAt,
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'name': name,
-      'orbitX': orbitX,
-      'orbitY': orbitY,
-      'zoom': zoom,
-      'createdAt': createdAt.toIso8601String(),
-    };
-  }
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'orbitX': orbitX,
+        'orbitY': orbitY,
+        'zoom': zoom,
+        'createdAt': createdAt.toIso8601String(),
+      };
 
-  factory CameraPreset.fromJson(Map<String, dynamic> json) {
-    return CameraPreset(
-      id: json['id'] as String,
-      name: json['name'] as String,
-      orbitX: (json['orbitX'] as num).toDouble(),
-      orbitY: (json['orbitY'] as num).toDouble(),
-      zoom: (json['zoom'] as num).toDouble(),
-      createdAt: DateTime.parse(json['createdAt'] as String),
-    );
-  }
+  factory CameraPreset.fromJson(Map<String, dynamic> json) => CameraPreset(
+        id: json['id'] as String,
+        name: json['name'] as String,
+        orbitX: (json['orbitX'] as num).toDouble(),
+        orbitY: (json['orbitY'] as num).toDouble(),
+        zoom: (json['zoom'] as num).toDouble(),
+        createdAt: DateTime.parse(json['createdAt'] as String),
+      );
 }
 
 class ProjectSettings {
@@ -200,7 +151,7 @@ class ProjectSettings {
     this.musicAssetId,
     this.cameraAssetId,
     this.playhead = 0,
-    this.duration = 204000,
+    this.duration = 0,
     this.orbitX = 0,
     this.orbitY = 0,
     this.zoom = 1,
@@ -246,37 +197,33 @@ class ProjectSettings {
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'modelAssetId': modelAssetId,
-      'motionAssetId': motionAssetId,
-      'musicAssetId': musicAssetId,
-      'cameraAssetId': cameraAssetId,
-      'playhead': playhead,
-      'duration': duration,
-      'orbitX': orbitX,
-      'orbitY': orbitY,
-      'zoom': zoom,
-      'cameraPresets': cameraPresets.map((item) => item.toJson()).toList(),
-    };
-  }
+  Map<String, dynamic> toJson() => {
+        'modelAssetId': modelAssetId,
+        'motionAssetId': motionAssetId,
+        'musicAssetId': musicAssetId,
+        'cameraAssetId': cameraAssetId,
+        'playhead': playhead,
+        'duration': duration,
+        'orbitX': orbitX,
+        'orbitY': orbitY,
+        'zoom': zoom,
+        'cameraPresets': cameraPresets.map((e) => e.toJson()).toList(),
+      };
 
-  factory ProjectSettings.fromJson(Map<String, dynamic> json) {
-    return ProjectSettings(
-      modelAssetId: json['modelAssetId'] as String?,
-      motionAssetId: json['motionAssetId'] as String?,
-      musicAssetId: json['musicAssetId'] as String?,
-      cameraAssetId: json['cameraAssetId'] as String?,
-      playhead: (json['playhead'] as num?)?.toInt() ?? 0,
-      duration: (json['duration'] as num?)?.toInt() ?? 204000,
-      orbitX: (json['orbitX'] as num?)?.toDouble() ?? 0,
-      orbitY: (json['orbitY'] as num?)?.toDouble() ?? 0,
-      zoom: (json['zoom'] as num?)?.toDouble() ?? 1,
-      cameraPresets: (json['cameraPresets'] as List<dynamic>? ?? const [])
-          .map((item) => CameraPreset.fromJson(item as Map<String, dynamic>))
-          .toList(),
-    );
-  }
+  factory ProjectSettings.fromJson(Map<String, dynamic> json) => ProjectSettings(
+        modelAssetId: json['modelAssetId'] as String?,
+        motionAssetId: json['motionAssetId'] as String?,
+        musicAssetId: json['musicAssetId'] as String?,
+        cameraAssetId: json['cameraAssetId'] as String?,
+        playhead: (json['playhead'] as num?)?.toInt() ?? 0,
+        duration: (json['duration'] as num?)?.toInt() ?? 0,
+        orbitX: (json['orbitX'] as num?)?.toDouble() ?? 0,
+        orbitY: (json['orbitY'] as num?)?.toDouble() ?? 0,
+        zoom: (json['zoom'] as num?)?.toDouble() ?? 1,
+        cameraPresets: (json['cameraPresets'] as List<dynamic>? ?? const [])
+            .map((e) => CameraPreset.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
 }
 
 class KioProject {
@@ -294,41 +241,31 @@ class KioProject {
   final DateTime updatedAt;
   final ProjectSettings settings;
 
-  KioProject copyWith({
-    String? id,
-    String? name,
-    DateTime? createdAt,
-    DateTime? updatedAt,
-    ProjectSettings? settings,
-  }) {
+  KioProject copyWith({String? name, DateTime? updatedAt, ProjectSettings? settings}) {
     return KioProject(
-      id: id ?? this.id,
+      id: id,
       name: name ?? this.name,
-      createdAt: createdAt ?? this.createdAt,
+      createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       settings: settings ?? this.settings,
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'name': name,
-      'createdAt': createdAt.toIso8601String(),
-      'updatedAt': updatedAt.toIso8601String(),
-      'settings': settings.toJson(),
-    };
-  }
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'createdAt': createdAt.toIso8601String(),
+        'updatedAt': updatedAt.toIso8601String(),
+        'settings': settings.toJson(),
+      };
 
-  factory KioProject.fromJson(Map<String, dynamic> json) {
-    return KioProject(
-      id: json['id'] as String,
-      name: json['name'] as String,
-      createdAt: DateTime.parse(json['createdAt'] as String),
-      updatedAt: DateTime.parse(json['updatedAt'] as String),
-      settings: ProjectSettings.fromJson(json['settings'] as Map<String, dynamic>),
-    );
-  }
+  factory KioProject.fromJson(Map<String, dynamic> json) => KioProject(
+        id: json['id'] as String,
+        name: json['name'] as String,
+        createdAt: DateTime.parse(json['createdAt'] as String),
+        updatedAt: DateTime.parse(json['updatedAt'] as String),
+        settings: ProjectSettings.fromJson(json['settings'] as Map<String, dynamic>),
+      );
 }
 
 class KioState {
@@ -343,17 +280,13 @@ class KioState {
   final String selectedProjectId;
 
   KioProject get selectedProject {
-    return projects.firstWhere(
-      (project) => project.id == selectedProjectId,
-      orElse: () => projects.first,
-    );
+    for (final project in projects) {
+      if (project.id == selectedProjectId) return project;
+    }
+    return projects.first;
   }
 
-  KioState copyWith({
-    List<KioProject>? projects,
-    List<KioAsset>? assets,
-    String? selectedProjectId,
-  }) {
+  KioState copyWith({List<KioProject>? projects, List<KioAsset>? assets, String? selectedProjectId}) {
     return KioState(
       projects: projects ?? this.projects,
       assets: assets ?? this.assets,
@@ -361,25 +294,23 @@ class KioState {
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'projects': projects.map((item) => item.toJson()).toList(),
-      'assets': assets.map((item) => item.toJson()).toList(),
-      'selectedProjectId': selectedProjectId,
-    };
-  }
+  Map<String, dynamic> toJson() => {
+        'projects': projects.map((e) => e.toJson()).toList(),
+        'assets': assets.map((e) => e.toJson()).toList(),
+        'selectedProjectId': selectedProjectId,
+      };
 
   factory KioState.fromJson(Map<String, dynamic> json) {
-    final projects = (json['projects'] as List<dynamic>? ?? const [])
-        .map((item) => KioProject.fromJson(item as Map<String, dynamic>))
+    final loadedProjects = (json['projects'] as List<dynamic>? ?? const [])
+        .map((e) => KioProject.fromJson(e as Map<String, dynamic>))
         .toList();
-    final normalizedProjects = projects.isEmpty ? [KioState.defaultState().selectedProject] : projects;
+    final projects = loadedProjects.isEmpty ? KioState.defaultState().projects : loadedProjects;
     return KioState(
-      projects: normalizedProjects,
+      projects: projects,
       assets: (json['assets'] as List<dynamic>? ?? const [])
-          .map((item) => KioAsset.fromJson(item as Map<String, dynamic>))
+          .map((e) => KioAsset.fromJson(e as Map<String, dynamic>))
           .toList(),
-      selectedProjectId: json['selectedProjectId'] as String? ?? normalizedProjects.first.id,
+      selectedProjectId: json['selectedProjectId'] as String? ?? projects.first.id,
     );
   }
 
@@ -392,18 +323,11 @@ class KioState {
       updatedAt: now,
       settings: ProjectSettings(),
     );
-    return KioState(
-      projects: [project],
-      assets: const [],
-      selectedProjectId: project.id,
-    );
+    return KioState(projects: [project], assets: const [], selectedProjectId: project.id);
   }
 
   String encode() => jsonEncode(toJson());
-
-  static KioState decode(String source) {
-    return KioState.fromJson(jsonDecode(source) as Map<String, dynamic>);
-  }
+  static KioState decode(String raw) => KioState.fromJson(jsonDecode(raw) as Map<String, dynamic>);
 }
 
 const Object _sentinel = Object();
