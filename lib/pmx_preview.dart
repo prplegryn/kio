@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
@@ -15,6 +16,7 @@ class PmxPreview extends StatefulWidget {
     super.key,
     required this.asset,
     required this.motionAsset,
+    required this.faceAsset,
     required this.cameraAsset,
     required this.orbitX,
     required this.orbitY,
@@ -25,6 +27,7 @@ class PmxPreview extends StatefulWidget {
 
   final KioAsset? asset;
   final KioAsset? motionAsset;
+  final KioAsset? faceAsset;
   final KioAsset? cameraAsset;
   final double orbitX;
   final double orbitY;
@@ -39,6 +42,7 @@ class PmxPreview extends StatefulWidget {
 class _PmxPreviewState extends State<PmxPreview> {
   PmxMesh? mesh;
   VmdData? motion;
+  VmdData? face;
   VmdData? camera;
   String? loadingKey;
   String? status;
@@ -55,6 +59,7 @@ class _PmxPreviewState extends State<PmxPreview> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.asset?.id != widget.asset?.id ||
         oldWidget.motionAsset?.id != widget.motionAsset?.id ||
+        oldWidget.faceAsset?.id != widget.faceAsset?.id ||
         oldWidget.cameraAsset?.id != widget.cameraAsset?.id) {
       _load();
     }
@@ -62,11 +67,12 @@ class _PmxPreviewState extends State<PmxPreview> {
 
   Future<void> _load() async {
     final asset = widget.asset;
-    final key = '${asset?.id ?? '-'}:${widget.motionAsset?.id ?? '-'}:${widget.cameraAsset?.id ?? '-'}';
+    final key = '${asset?.id ?? '-'}:${widget.motionAsset?.id ?? '-'}:${widget.faceAsset?.id ?? '-'}:${widget.cameraAsset?.id ?? '-'}';
     if (asset == null) {
       setState(() {
         mesh = null;
         motion = null;
+        face = null;
         camera = null;
         loadingKey = null;
         status = 'No model selected';
@@ -78,6 +84,7 @@ class _PmxPreviewState extends State<PmxPreview> {
     setState(() {
       mesh = null;
       motion = null;
+      face = null;
       camera = null;
       loadingKey = key;
       status = 'Loading ${asset.displayName}...';
@@ -90,16 +97,18 @@ class _PmxPreviewState extends State<PmxPreview> {
         throw Exception('No PMX or PMD file found. Re-import model as a ZIP that contains a supported model.');
       }
 
-      final parsedMesh = MmdMeshParser.parseBytes(payload.bytes);
+      final parsedMesh = await compute(_parseMmdMesh, payload.bytes);
       final parsedMotion = await _loadVmd(widget.motionAsset);
+      final parsedFace = await _loadVmd(widget.faceAsset);
       final parsedCamera = await _loadVmd(widget.cameraAsset);
       if (!mounted || loadingKey != key) return;
 
       setState(() {
         mesh = parsedMesh;
         motion = parsedMotion;
+        face = parsedFace;
         camera = parsedCamera;
-        status = _statusFor(parsedMesh, parsedMotion, parsedCamera);
+        status = _statusFor(parsedMesh, parsedMotion, parsedFace, parsedCamera);
         statusIsError = false;
       });
     } catch (error) {
@@ -107,6 +116,7 @@ class _PmxPreviewState extends State<PmxPreview> {
       setState(() {
         mesh = null;
         motion = null;
+        face = null;
         camera = null;
         status = error.toString().replaceFirst('Exception: ', '');
         statusIsError = true;
@@ -116,10 +126,11 @@ class _PmxPreviewState extends State<PmxPreview> {
 
   Future<VmdData?> _loadVmd(KioAsset? asset) async {
     if (asset == null) return null;
-    return VmdParser.parseAssetFile(asset.localPath);
+    if (!asset.localPath.toLowerCase().endsWith('.vmd')) return null;
+    return compute(_parseVmd, await File(asset.localPath).readAsBytes());
   }
 
-  String _statusFor(PmxMesh mesh, VmdData? motion, VmdData? camera) {
+  String _statusFor(PmxMesh mesh, VmdData? motion, VmdData? face, VmdData? camera) {
     final parts = [
       '${mesh.format}: ${mesh.vertices.length} vertices / ${mesh.indices.length ~/ 3} triangles',
     ];
@@ -127,6 +138,11 @@ class _PmxPreviewState extends State<PmxPreview> {
       parts.add('motion ${motion.maxFrame}f');
     } else if (widget.motionAsset != null) {
       parts.add('${p.extension(widget.motionAsset!.originalName).toUpperCase().replaceFirst('.', '')} motion not playable');
+    }
+    if (face != null && face.hasMorphMotion) {
+      parts.add('face ${face.maxFrame}f');
+    } else if (widget.faceAsset != null) {
+      parts.add('${p.extension(widget.faceAsset!.originalName).toUpperCase().replaceFirst('.', '')} face not playable');
     }
     if (camera != null && camera.hasCameraMotion) {
       parts.add('camera ${camera.maxFrame}f');
@@ -269,6 +285,10 @@ class _PmxPreviewState extends State<PmxPreview> {
   }
 }
 
+PmxMesh _parseMmdMesh(Uint8List bytes) => MmdMeshParser.parseBytes(bytes);
+
+VmdData _parseVmd(Uint8List bytes) => VmdParser.parseBytes(bytes);
+
 class _PmxPayload {
   _PmxPayload(this.name, this.bytes);
   final String name;
@@ -280,6 +300,7 @@ class PmxMesh {
     required this.format,
     required this.vertices,
     required this.indices,
+    required this.materials,
     required this.bones,
     required this.minX,
     required this.maxX,
@@ -292,6 +313,7 @@ class PmxMesh {
   final String format;
   final List<MmdVertex> vertices;
   final List<int> indices;
+  final List<MmdMaterial> materials;
   final List<MmdBone> bones;
   final double minX;
   final double maxX;
@@ -299,6 +321,14 @@ class PmxMesh {
   final double maxY;
   final double minZ;
   final double maxZ;
+}
+
+class MmdMaterial {
+  const MmdMaterial({required this.color, required this.indexStart, required this.indexCount});
+
+  final Color color;
+  final int indexStart;
+  final int indexCount;
 }
 
 class MmdVertex {
@@ -440,8 +470,12 @@ class PmxParser {
     }
 
     final materialCount = r.readInt32();
+    final materials = <MmdMaterial>[];
+    var materialIndexStart = 0;
     for (var i = 0; i < materialCount; i++) {
-      _skipPmxMaterial(r, textEncoding, textureIndexSize);
+      final material = _readPmxMaterial(r, textEncoding, textureIndexSize, materialIndexStart);
+      materials.add(material);
+      materialIndexStart += material.indexCount;
     }
 
     final boneCount = r.readInt32();
@@ -454,6 +488,7 @@ class PmxParser {
       format: 'PMX',
       vertices: vertices,
       indices: indices,
+      materials: materials.isEmpty ? _defaultMaterials(indices.length) : materials,
       bones: _buildBones(rawBones),
       minX: minX,
       maxX: maxX,
@@ -497,10 +532,13 @@ class PmxParser {
     }
   }
 
-  static void _skipPmxMaterial(_Reader r, int textEncoding, int textureIndexSize) {
+  static MmdMaterial _readPmxMaterial(_Reader r, int textEncoding, int textureIndexSize, int indexStart) {
     r.readText(textEncoding);
     r.readText(textEncoding);
-    r.skipFloat32(4);
+    final red = r.readFloat32();
+    final green = r.readFloat32();
+    final blue = r.readFloat32();
+    final alpha = r.readFloat32();
     r.skipFloat32(3);
     r.skipFloat32(1);
     r.skipFloat32(3);
@@ -517,7 +555,12 @@ class PmxParser {
       r.skip(1);
     }
     r.readText(textEncoding);
-    r.readInt32();
+    final indexCount = r.readInt32();
+    return MmdMaterial(
+      color: _materialColor(red, green, blue, alpha),
+      indexStart: indexStart,
+      indexCount: indexCount,
+    );
   }
 
   static _RawBone _readPmxBone(_Reader r, int textEncoding, int boneIndexSize) {
@@ -633,7 +676,29 @@ class PmdParser {
     }
 
     final materialCount = r.readInt32();
-    r.skip(materialCount * 70);
+    final materials = <MmdMaterial>[];
+    var materialIndexStart = 0;
+    for (var i = 0; i < materialCount; i++) {
+      final red = r.readFloat32();
+      final green = r.readFloat32();
+      final blue = r.readFloat32();
+      final alpha = r.readFloat32();
+      r.skipFloat32(1);
+      r.skipFloat32(3);
+      r.skipFloat32(3);
+      r.skip(1);
+      r.skip(1);
+      final indexCount = r.readInt32();
+      r.skip(20);
+      materials.add(
+        MmdMaterial(
+          color: _materialColor(red, green, blue, alpha),
+          indexStart: materialIndexStart,
+          indexCount: indexCount,
+        ),
+      );
+      materialIndexStart += indexCount;
+    }
 
     final boneCount = r.readUint16();
     final rawBones = <_RawBone>[];
@@ -657,6 +722,7 @@ class PmdParser {
       format: 'PMD',
       vertices: vertices,
       indices: indices,
+      materials: materials.isEmpty ? _defaultMaterials(indices.length) : materials,
       bones: _buildBones(rawBones),
       minX: minX,
       maxX: maxX,
@@ -673,6 +739,19 @@ List<MmdBoneWeight> _cleanWeights(List<MmdBoneWeight> weights) {
   final total = cleaned.fold<double>(0, (sum, w) => sum + w.weight);
   if (total <= 0.0001) return const [];
   return [for (final w in cleaned) MmdBoneWeight(w.boneIndex, w.weight / total)];
+}
+
+List<MmdMaterial> _defaultMaterials(int indexCount) {
+  return [MmdMaterial(color: const Color(0xFFB8C3FF), indexStart: 0, indexCount: indexCount)];
+}
+
+Color _materialColor(double red, double green, double blue, double alpha) {
+  int channel(double value) {
+    return (value.clamp(0.0, 1.0) * 255).round().clamp(0, 255).toInt();
+  }
+
+  final a = channel(alpha).clamp(80, 255).toInt();
+  return Color.fromARGB(a, channel(red), channel(green), channel(blue));
 }
 
 List<MmdBone> _buildBones(List<_RawBone> rawBones) {
@@ -880,34 +959,31 @@ class PmxMeshPainter extends CustomPainter {
       );
     }
 
-    final fill = Paint()
-      ..color = const Color(0x336D83FF)
-      ..style = PaintingStyle.fill;
-
-    final line = Paint()
-      ..color = const Color(0xFFE9ECFF)
-      ..strokeWidth = .62
-      ..style = PaintingStyle.stroke;
-
+    final fill = Paint()..style = PaintingStyle.fill;
     final triangleCount = mesh.indices.length ~/ 3;
-    final step = math.max(1, triangleCount ~/ 9000);
+    final step = math.max(1, triangleCount ~/ 6000);
 
-    for (var tri = 0; tri < triangleCount; tri += step) {
-      final i = tri * 3;
-      final a = mesh.indices[i];
-      final b = mesh.indices[i + 1];
-      final c = mesh.indices[i + 2];
+    for (final material in mesh.materials) {
+      final start = material.indexStart.clamp(0, mesh.indices.length).toInt();
+      final end = (material.indexStart + material.indexCount).clamp(start, mesh.indices.length).toInt();
+      if (end - start < 3) continue;
 
-      if (a >= projected.length || b >= projected.length || c >= projected.length) continue;
+      final path = Path();
+      for (var i = start; i + 2 < end; i += 3 * step) {
+        final a = mesh.indices[i];
+        final b = mesh.indices[i + 1];
+        final c = mesh.indices[i + 2];
 
-      final path = Path()
-        ..moveTo(projected[a].dx, projected[a].dy)
-        ..lineTo(projected[b].dx, projected[b].dy)
-        ..lineTo(projected[c].dx, projected[c].dy)
-        ..close();
+        if (a >= projected.length || b >= projected.length || c >= projected.length) continue;
 
+        path
+          ..moveTo(projected[a].dx, projected[a].dy)
+          ..lineTo(projected[b].dx, projected[b].dy)
+          ..lineTo(projected[c].dx, projected[c].dy)
+          ..close();
+      }
+      fill.color = material.color;
       canvas.drawPath(path, fill);
-      canvas.drawPath(path, line);
     }
   }
 
@@ -923,7 +999,7 @@ class PmxMeshPainter extends CustomPainter {
       final parent = bone.parentIndex;
       final parentPosition = parent >= 0 ? mesh.bones[parent].position : MmdVec3.zero;
       final baseOffset = parent >= 0 ? bone.position - parentPosition : bone.position;
-      final pose = currentMotion.sampleBone(bone.canonicalName, frame);
+      final pose = _poseForBone(currentMotion, bone.canonicalName, frame);
       final local = MmdMat4.translationRotation(
         baseOffset + (pose?.translation ?? MmdVec3.zero),
         pose?.rotation ?? MmdQuat.identity,
@@ -949,6 +1025,28 @@ class PmxMeshPainter extends CustomPainter {
     }
     if (total <= 0.0001) return vertex.bindPosition;
     return out * (1 / total);
+  }
+
+  VmdBonePose? _poseForBone(VmdData motion, String boneName, double frame) {
+    final direct = motion.sampleBone(boneName, frame);
+    if (direct != null) return direct;
+
+    var fallbackNames = const <String>[];
+    if (boneName == 'leftleg' || boneName == 'leftknee' || boneName == 'leftankle') {
+      fallbackNames = const ['leftlegik'];
+    } else if (boneName == 'rightleg' || boneName == 'rightknee' || boneName == 'rightankle') {
+      fallbackNames = const ['rightlegik'];
+    } else if (boneName == 'lefttoe') {
+      fallbackNames = const ['lefttoeik', 'leftlegik'];
+    } else if (boneName == 'righttoe') {
+      fallbackNames = const ['righttoeik', 'rightlegik'];
+    }
+
+    for (final fallback in fallbackNames) {
+      final pose = motion.sampleBone(fallback, frame);
+      if (pose != null) return pose;
+    }
+    return null;
   }
 
   @override

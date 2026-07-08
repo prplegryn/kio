@@ -67,9 +67,15 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   final player = AudioPlayer();
   final previewKey = GlobalKey();
   Timer? timer;
+  Timer? cameraSaveTimer;
   DateTime? playbackStartedAt;
   int playbackStartMs = 0;
+  int? livePlayheadMs;
   int? exportPlayheadMs;
+  double? liveOrbitX;
+  double? liveOrbitY;
+  double? liveZoom;
+  String? visibleProjectId;
   String? loadedMusicId;
   String? exportStatus;
   bool drawerOpen = false;
@@ -90,12 +96,21 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   @override
   void dispose() {
     timer?.cancel();
+    cameraSaveTimer?.cancel();
     unawaited(player.dispose());
     store.removeListener(_refresh);
     super.dispose();
   }
 
   void _refresh() {
+    final projectId = store.state.selectedProjectId;
+    if (visibleProjectId != projectId) {
+      visibleProjectId = projectId;
+      livePlayheadMs = null;
+      liveOrbitX = null;
+      liveOrbitY = null;
+      liveZoom = null;
+    }
     setState(() {});
     unawaited(_syncAudio());
   }
@@ -107,6 +122,10 @@ class _KioWorkspaceState extends State<KioWorkspace> {
     }
 
     final project = store.selectedProject;
+    final playheadMs = _playheadMs;
+    final orbitX = _orbitX;
+    final orbitY = _orbitY;
+    final zoom = _zoom;
     return Scaffold(
       body: Stack(
         children: [
@@ -116,9 +135,13 @@ class _KioWorkspaceState extends State<KioWorkspace> {
               child: _PlayerCanvas(
                 project: project,
                 store: store,
-                playheadOverrideMs: exportPlayheadMs,
+                playheadMs: exportPlayheadMs ?? playheadMs,
+                orbitX: orbitX,
+                orbitY: orbitY,
+                zoom: zoom,
                 showOverlays: !exporting,
                 onCameraChanged: _updateCamera,
+                onCameraChangeEnd: _flushCamera,
               ),
             ),
           ),
@@ -141,13 +164,11 @@ class _KioWorkspaceState extends State<KioWorkspace> {
           ),
           _BottomPlayback(
             project: project,
+            playheadMs: playheadMs,
             playing: playing,
             onPlayPause: _togglePlayback,
-            onSeek: (v) {
-              final ms = v.round();
-              unawaited(player.seek(Duration(milliseconds: ms)));
-              unawaited(store.updatePlayhead(ms));
-            },
+            onSeekPreview: _previewSeek,
+            onSeekCommit: _commitSeek,
           ),
           _SidePanel(
             open: drawerOpen,
@@ -241,6 +262,22 @@ class _KioWorkspaceState extends State<KioWorkspace> {
     if (name != null) await store.renameAsset(asset.id, name);
   }
 
+  int get _playheadMs {
+    return livePlayheadMs ?? store.selectedProject.settings.playhead;
+  }
+
+  double get _orbitX {
+    return liveOrbitX ?? store.selectedProject.settings.orbitX;
+  }
+
+  double get _orbitY {
+    return liveOrbitY ?? store.selectedProject.settings.orbitY;
+  }
+
+  double get _zoom {
+    return liveZoom ?? store.selectedProject.settings.zoom;
+  }
+
   void _togglePlayback() {
     final duration = store.selectedProject.settings.duration;
     if (duration <= 0) {
@@ -252,19 +289,20 @@ class _KioWorkspaceState extends State<KioWorkspace> {
       timer?.cancel();
       timer = null;
       unawaited(player.pause());
+      unawaited(store.updatePlayhead(_playheadMs));
       setState(() => playing = false);
       return;
     }
 
     setState(() => playing = true);
-    playbackStartMs = store.selectedProject.settings.playhead;
+    playbackStartMs = _playheadMs;
     playbackStartedAt = DateTime.now();
     if (store.selectedProject.settings.musicAssetId != null) {
       unawaited(player.seek(Duration(milliseconds: playbackStartMs)));
       unawaited(player.play());
     }
 
-    timer = Timer.periodic(const Duration(milliseconds: 120), (_) {
+    timer = Timer.periodic(const Duration(milliseconds: 16), (_) {
       final s = store.selectedProject.settings;
       final elapsed = DateTime.now().difference(playbackStartedAt ?? DateTime.now()).inMilliseconds;
       final pos = s.musicAssetId != null ? player.position.inMilliseconds : playbackStartMs + elapsed;
@@ -273,12 +311,25 @@ class _KioWorkspaceState extends State<KioWorkspace> {
         timer = null;
         unawaited(player.pause());
         unawaited(player.seek(Duration.zero));
+        livePlayheadMs = 0;
         unawaited(store.updatePlayhead(0));
         setState(() => playing = false);
         return;
       }
-      unawaited(store.updatePlayhead(pos.clamp(0, s.duration).toInt()));
+      setState(() => livePlayheadMs = pos.clamp(0, s.duration).toInt());
     });
+  }
+
+  void _previewSeek(double value) {
+    final ms = value.round();
+    setState(() => livePlayheadMs = ms);
+  }
+
+  void _commitSeek(double value) {
+    final ms = value.round();
+    setState(() => livePlayheadMs = ms);
+    unawaited(player.seek(Duration(milliseconds: ms)));
+    unawaited(store.updatePlayhead(ms));
   }
 
   Future<void> _syncAudio() async {
@@ -308,15 +359,25 @@ class _KioWorkspaceState extends State<KioWorkspace> {
   }
 
   void _updateCamera(Offset delta, double scale) {
-    final s = store.selectedProject.settings;
-    unawaited(store.updateCamera(
-      orbitX: (s.orbitX + delta.dx * .12).clamp(-180.0, 180.0).toDouble(),
-      orbitY: (s.orbitY + delta.dy * .12).clamp(-90.0, 90.0).toDouble(),
-      zoom: (s.zoom * scale).clamp(.45, 2.6).toDouble(),
-    ));
+    final nextZoom = (_zoom * math.pow(scale, .85)).clamp(.35, 3.5).toDouble();
+    setState(() {
+      liveOrbitX = (_orbitX + delta.dx * .16).clamp(-180.0, 180.0).toDouble();
+      liveOrbitY = (_orbitY + delta.dy * .16).clamp(-90.0, 90.0).toDouble();
+      liveZoom = nextZoom;
+    });
+    cameraSaveTimer?.cancel();
+    cameraSaveTimer = Timer(const Duration(milliseconds: 180), () => unawaited(_flushCamera()));
+  }
+
+  Future<void> _flushCamera() async {
+    cameraSaveTimer?.cancel();
+    cameraSaveTimer = null;
+    if (liveOrbitX == null && liveOrbitY == null && liveZoom == null) return;
+    await store.updateCamera(orbitX: _orbitX, orbitY: _orbitY, zoom: _zoom);
   }
 
   Future<void> _addPreset() async {
+    await _flushCamera();
     await store.createCameraPreset();
     _toast('Camera preset created.');
   }
@@ -342,8 +403,8 @@ class _KioWorkspaceState extends State<KioWorkspace> {
     }
 
     final duration = math.max(project.settings.duration, 1000);
-    const fps = 12;
-    const maxFrames = 720;
+    const fps = 60;
+    const maxFrames = 3600;
     final requestedFrames = math.max(1, (duration * fps / 1000).ceil());
     final frameCount = math.min(requestedFrames, maxFrames);
     final archive = Archive();
@@ -384,6 +445,7 @@ class _KioWorkspaceState extends State<KioWorkspace> {
         'capped': requestedFrames > maxFrames,
         'model': store.assetById(project.settings.modelAssetId)?.displayName,
         'motion': store.assetById(project.settings.motionAssetId)?.displayName,
+        'face': store.assetById(project.settings.faceAssetId)?.displayName,
         'camera': store.assetById(project.settings.cameraAssetId)?.displayName,
         'music': store.assetById(project.settings.musicAssetId)?.displayName,
       });
@@ -419,16 +481,24 @@ class _PlayerCanvas extends StatefulWidget {
   const _PlayerCanvas({
     required this.project,
     required this.store,
-    required this.playheadOverrideMs,
+    required this.playheadMs,
+    required this.orbitX,
+    required this.orbitY,
+    required this.zoom,
     required this.showOverlays,
     required this.onCameraChanged,
+    required this.onCameraChangeEnd,
   });
 
   final KioProject project;
   final KioStore store;
-  final int? playheadOverrideMs;
+  final int playheadMs;
+  final double orbitX;
+  final double orbitY;
+  final double zoom;
   final bool showOverlays;
   final void Function(Offset delta, double scale) onCameraChanged;
+  final VoidCallback onCameraChangeEnd;
 
   @override
   State<_PlayerCanvas> createState() => _PlayerCanvasState();
@@ -436,92 +506,45 @@ class _PlayerCanvas extends StatefulWidget {
 
 class _PlayerCanvasState extends State<_PlayerCanvas> {
   Offset last = Offset.zero;
+  double lastGestureScale = 1;
 
   @override
   Widget build(BuildContext context) {
     final s = widget.project.settings;
-    final playheadMs = widget.playheadOverrideMs ?? s.playhead;
     final model = widget.store.assetById(s.modelAssetId);
     final motion = widget.store.assetById(s.motionAssetId);
-    final music = widget.store.assetById(s.musicAssetId);
+    final face = widget.store.assetById(s.faceAssetId);
     final camera = widget.store.assetById(s.cameraAssetId);
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onScaleStart: (d) => last = d.focalPoint,
+      onScaleStart: (d) {
+        last = d.focalPoint;
+        lastGestureScale = 1;
+      },
       onScaleUpdate: (d) {
         final delta = d.focalPoint - last;
+        final scale = d.scale <= 0 ? 1.0 : d.scale / lastGestureScale;
         last = d.focalPoint;
-        widget.onCameraChanged(delta, d.scale == 0 ? 1 : d.scale);
+        lastGestureScale = d.scale <= 0 ? 1 : d.scale;
+        widget.onCameraChanged(delta, scale);
       },
+      onScaleEnd: (_) => widget.onCameraChangeEnd(),
       child: Stack(
         fit: StackFit.expand,
         children: [
-          CustomPaint(painter: _StagePainter(orbitX: s.orbitX, orbitY: s.orbitY, zoom: s.zoom)),
+          CustomPaint(painter: _StagePainter(orbitX: widget.orbitX, orbitY: widget.orbitY, zoom: widget.zoom)),
           PmxPreview(
             asset: model,
             motionAsset: motion,
+            faceAsset: face,
             cameraAsset: camera,
-            orbitX: s.orbitX,
-            orbitY: s.orbitY,
-            zoom: s.zoom,
-            playheadMs: playheadMs,
+            orbitX: widget.orbitX,
+            orbitY: widget.orbitY,
+            zoom: widget.zoom,
+            playheadMs: widget.playheadMs,
             showStatus: widget.showOverlays,
           ),
-          if (widget.showOverlays)
-            Positioned(
-              left: 8,
-              bottom: MediaQuery.of(context).padding.bottom + 96,
-              child: _SelectionSummary(model: model, motion: motion, music: music, camera: camera),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SelectionSummary extends StatelessWidget {
-  const _SelectionSummary({required this.model, required this.motion, required this.music, required this.camera});
-  final KioAsset? model;
-  final KioAsset? motion;
-  final KioAsset? music;
-  final KioAsset? camera;
-
-  @override
-  Widget build(BuildContext context) {
-    final rows = [(KioAssetType.model, model), (KioAssetType.motion, motion), (KioAssetType.music, music), (KioAssetType.camera, camera)];
-    final empty = rows.every((r) => r.$2 == null);
-    return Container(
-      width: 250,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(color: KioColors.panel, borderRadius: BorderRadius.circular(16), border: Border.all(color: KioColors.line)),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(empty ? 'No project assets selected' : 'Current project', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900)),
-          const SizedBox(height: 10),
-          for (final row in rows) _AssetMiniLine(type: row.$1, asset: row.$2),
-        ],
-      ),
-    );
-  }
-}
-
-class _AssetMiniLine extends StatelessWidget {
-  const _AssetMiniLine({required this.type, required this.asset});
-  final KioAssetType type;
-  final KioAsset? asset;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Icon(type.icon, size: 15, color: asset == null ? KioColors.muted : KioColors.blue),
-          const SizedBox(width: 8),
-          SizedBox(width: 48, child: Text(type.label, style: const TextStyle(fontSize: 11, color: KioColors.muted))),
-          Expanded(child: Text(asset?.displayName ?? 'Not selected', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
         ],
       ),
     );
@@ -644,45 +667,83 @@ class _Flyout extends StatelessWidget {
 }
 
 class _BottomPlayback extends StatelessWidget {
-  const _BottomPlayback({required this.project, required this.playing, required this.onPlayPause, required this.onSeek});
+  const _BottomPlayback({
+    required this.project,
+    required this.playheadMs,
+    required this.playing,
+    required this.onPlayPause,
+    required this.onSeekPreview,
+    required this.onSeekCommit,
+  });
+
   final KioProject project;
+  final int playheadMs;
   final bool playing;
   final VoidCallback onPlayPause;
-  final ValueChanged<double> onSeek;
+  final ValueChanged<double> onSeekPreview;
+  final ValueChanged<double> onSeekCommit;
 
   @override
   Widget build(BuildContext context) {
     final s = project.settings;
     final max = math.max(0, s.duration).toDouble();
-    return Positioned(
-      left: 8,
-      right: 8,
-      bottom: MediaQuery.of(context).padding.bottom + 8,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(10, 7, 10, 8),
-        decoration: BoxDecoration(color: KioColors.panel, borderRadius: BorderRadius.circular(16), border: Border.all(color: KioColors.line)),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SliderTheme(
-              data: SliderTheme.of(context).copyWith(trackHeight: 2, thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5)),
-              child: Slider(value: max <= 0 ? 0 : s.playhead.clamp(0, s.duration).toDouble(), min: 0, max: max <= 0 ? 1 : max, onChanged: max <= 0 ? null : onSeek),
-            ),
-            Row(
+    final bottom = MediaQuery.of(context).padding.bottom;
+    final value = max <= 0 ? 0.0 : playheadMs.clamp(0, s.duration).toDouble();
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          Positioned(
+            left: 12,
+            right: 12,
+            bottom: bottom + 72,
+            child: Row(
               children: [
-                Text(_formatTime(s.playhead), style: const TextStyle(fontSize: 10, color: KioColors.muted)),
-                const Spacer(),
-                _RoundButton(icon: Icons.skip_previous_rounded, onTap: () {}),
+                Text(_formatTime(playheadMs), style: const TextStyle(fontSize: 10, color: KioColors.muted, fontWeight: FontWeight.w800)),
                 const SizedBox(width: 8),
-                _RoundButton(icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded, onTap: onPlayPause, primary: true),
+                Expanded(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: const Color(0x9911141D),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: KioColors.line),
+                    ),
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 3,
+                        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                        overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                      ),
+                      child: Slider(
+                        value: value,
+                        min: 0,
+                        max: max <= 0 ? 1 : max,
+                        onChanged: max <= 0 ? null : onSeekPreview,
+                        onChangeEnd: max <= 0 ? null : onSeekCommit,
+                      ),
+                    ),
+                  ),
+                ),
                 const SizedBox(width: 8),
-                _RoundButton(icon: Icons.skip_next_rounded, onTap: () {}),
-                const Spacer(),
-                Text(_formatTime(s.duration), style: const TextStyle(fontSize: 10, color: KioColors.muted)),
+                Text(_formatTime(s.duration), style: const TextStyle(fontSize: 10, color: KioColors.muted, fontWeight: FontWeight.w800)),
               ],
             ),
-          ],
-        ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: bottom + 16,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _RoundButton(icon: Icons.skip_previous_rounded, onTap: () {}),
+                const SizedBox(width: 10),
+                _RoundButton(icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded, onTap: onPlayPause, primary: true),
+                const SizedBox(width: 10),
+                _RoundButton(icon: Icons.skip_next_rounded, onTap: () {}),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -853,6 +914,7 @@ bool _projectUsesAsset(ProjectSettings settings, KioAsset asset) {
   return switch (asset.type) {
     KioAssetType.model => settings.modelAssetId == asset.id,
     KioAssetType.motion => settings.motionAssetId == asset.id,
+    KioAssetType.face => settings.faceAssetId == asset.id,
     KioAssetType.music => settings.musicAssetId == asset.id,
     KioAssetType.camera => settings.cameraAssetId == asset.id,
   };

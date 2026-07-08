@@ -179,15 +179,18 @@ class VmdData {
   VmdData({
     required this.boneFrames,
     required this.cameraFrames,
+    required this.morphFrameCount,
     required this.maxFrame,
   });
 
   final Map<String, List<VmdBoneFrame>> boneFrames;
   final List<VmdCameraFrame> cameraFrames;
+  final int morphFrameCount;
   final int maxFrame;
 
   int get durationMs => (maxFrame * 1000 / 30).ceil();
   bool get hasBoneMotion => boneFrames.values.any((frames) => frames.isNotEmpty);
+  bool get hasMorphMotion => morphFrameCount > 0;
   bool get hasCameraMotion => cameraFrames.isNotEmpty;
 
   VmdBonePose? sampleBone(String canonicalName, double frame) {
@@ -290,7 +293,12 @@ class VmdParser {
     }
 
     final morphCount = r.readUint32();
-    r.skip(morphCount * 23);
+    for (var i = 0; i < morphCount; i++) {
+      r.skip(15);
+      final frame = r.readUint32();
+      r.skip(4);
+      maxFrame = math.max(maxFrame, frame);
+    }
 
     final cameraFrames = <VmdCameraFrame>[];
     final cameraCount = r.readUint32();
@@ -319,7 +327,12 @@ class VmdParser {
       frames.sort((a, b) => a.frame.compareTo(b.frame));
     }
     cameraFrames.sort((a, b) => a.frame.compareTo(b.frame));
-    return VmdData(boneFrames: boneFrames, cameraFrames: cameraFrames, maxFrame: maxFrame);
+    return VmdData(
+      boneFrames: boneFrames,
+      cameraFrames: cameraFrames,
+      morphFrameCount: morphCount,
+      maxFrame: maxFrame,
+    );
   }
 }
 
@@ -376,6 +389,14 @@ const _unicodeBoneNames = {
   '\u53f3\u8db3\u9996': 'rightankle',
   '\u5de6\u3064\u307e\u5148': 'lefttoe',
   '\u53f3\u3064\u307e\u5148': 'righttoe',
+  '\u5de6\u8db3\uff29\uff2b': 'leftlegik',
+  '\u53f3\u8db3\uff29\uff2b': 'rightlegik',
+  '\u5de6\u3064\u307e\u5148\uff29\uff2b': 'lefttoeik',
+  '\u53f3\u3064\u307e\u5148\uff29\uff2b': 'righttoeik',
+  '\u5de6\u8db3IK': 'leftlegik',
+  '\u53f3\u8db3IK': 'rightlegik',
+  '\u5de6\u3064\u307e\u5148IK': 'lefttoeik',
+  '\u53f3\u3064\u307e\u5148IK': 'righttoeik',
 };
 
 const _shiftJisBoneNames = {
@@ -402,6 +423,14 @@ const _shiftJisBoneNames = {
   '894591ab8ef1': 'rightankle',
   '8db682c282dc90e6': 'lefttoe',
   '894582c282dc90e6': 'righttoe',
+  '8db691ab8268826a': 'leftlegik',
+  '894591ab8268826a': 'rightlegik',
+  '8db682c282dc90e68268826a': 'lefttoeik',
+  '894582c282dc90e68268826a': 'righttoeik',
+  '8db691ab494b': 'leftlegik',
+  '894591ab494b': 'rightlegik',
+  '8db682c282dc90e6494b': 'lefttoeik',
+  '894582c282dc90e6494b': 'righttoeik',
 };
 
 class _VmdReader {

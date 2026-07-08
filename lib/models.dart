@@ -1,12 +1,13 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 
-enum KioAssetType { model, motion, music, camera }
+enum KioAssetType { model, motion, face, music, camera }
 
 extension KioAssetTypeX on KioAssetType {
   String get label => switch (this) {
         KioAssetType.model => 'Model',
         KioAssetType.motion => 'Motion',
+        KioAssetType.face => 'Face',
         KioAssetType.music => 'Music',
         KioAssetType.camera => 'Camera',
       };
@@ -14,6 +15,7 @@ extension KioAssetTypeX on KioAssetType {
   String get dir => switch (this) {
         KioAssetType.model => 'models',
         KioAssetType.motion => 'motions',
+        KioAssetType.face => 'faces',
         KioAssetType.music => 'music',
         KioAssetType.camera => 'cameras',
       };
@@ -21,6 +23,7 @@ extension KioAssetTypeX on KioAssetType {
   IconData get icon => switch (this) {
         KioAssetType.model => Icons.view_in_ar_rounded,
         KioAssetType.motion => Icons.directions_run_rounded,
+        KioAssetType.face => Icons.face_rounded,
         KioAssetType.music => Icons.music_note_rounded,
         KioAssetType.camera => Icons.videocam_rounded,
       };
@@ -28,6 +31,7 @@ extension KioAssetTypeX on KioAssetType {
   List<String> get extensions => switch (this) {
         KioAssetType.model => const ['zip'],
         KioAssetType.motion => const ['vmd', 'nmd'],
+        KioAssetType.face => const ['vmd', 'nmd'],
         KioAssetType.music => const ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'],
         KioAssetType.camera => const ['vmd', 'nmd'],
       };
@@ -153,6 +157,7 @@ class ProjectSettings {
   ProjectSettings({
     this.modelAssetId,
     this.motionAssetId,
+    this.faceAssetId,
     this.musicAssetId,
     this.cameraAssetId,
     this.playhead = 0,
@@ -165,6 +170,7 @@ class ProjectSettings {
 
   final String? modelAssetId;
   final String? motionAssetId;
+  final String? faceAssetId;
   final String? musicAssetId;
   final String? cameraAssetId;
   final int playhead;
@@ -179,6 +185,7 @@ class ProjectSettings {
   ProjectSettings copyWith({
     Object? modelAssetId = _sentinel,
     Object? motionAssetId = _sentinel,
+    Object? faceAssetId = _sentinel,
     Object? musicAssetId = _sentinel,
     Object? cameraAssetId = _sentinel,
     int? playhead,
@@ -191,6 +198,7 @@ class ProjectSettings {
     return ProjectSettings(
       modelAssetId: modelAssetId == _sentinel ? this.modelAssetId : modelAssetId as String?,
       motionAssetId: motionAssetId == _sentinel ? this.motionAssetId : motionAssetId as String?,
+      faceAssetId: faceAssetId == _sentinel ? this.faceAssetId : faceAssetId as String?,
       musicAssetId: musicAssetId == _sentinel ? this.musicAssetId : musicAssetId as String?,
       cameraAssetId: cameraAssetId == _sentinel ? this.cameraAssetId : cameraAssetId as String?,
       playhead: playhead ?? this.playhead,
@@ -205,6 +213,7 @@ class ProjectSettings {
   Map<String, dynamic> toJson() => {
         'modelAssetId': modelAssetId,
         'motionAssetId': motionAssetId,
+        'faceAssetId': faceAssetId,
         'musicAssetId': musicAssetId,
         'cameraAssetId': cameraAssetId,
         'playhead': playhead,
@@ -218,6 +227,7 @@ class ProjectSettings {
   factory ProjectSettings.fromJson(Map<String, dynamic> json) => ProjectSettings(
         modelAssetId: json['modelAssetId'] as String?,
         motionAssetId: json['motionAssetId'] as String?,
+        faceAssetId: json['faceAssetId'] as String?,
         musicAssetId: json['musicAssetId'] as String?,
         cameraAssetId: json['cameraAssetId'] as String?,
         playhead: (json['playhead'] as num?)?.toInt() ?? 0,

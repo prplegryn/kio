@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
@@ -120,6 +121,11 @@ class KioStore extends ChangeNotifier {
           motionAssetId: asset.id,
           playhead: 0,
           duration: _timelineDuration(s.copyWith(motionAssetId: asset.id)),
+        ),
+      KioAssetType.face => s.copyWith(
+          faceAssetId: asset.id,
+          playhead: 0,
+          duration: _timelineDuration(s.copyWith(faceAssetId: asset.id)),
         ),
       KioAssetType.music => s.copyWith(musicAssetId: asset.id, playhead: 0),
       KioAssetType.camera => s.copyWith(
@@ -332,16 +338,16 @@ class KioStore extends ChangeNotifier {
   }
 
   Future<int> _durationForImportedAsset(KioAssetType type, File file) async {
-    if (type != KioAssetType.motion && type != KioAssetType.camera) return 0;
-    final data = await VmdParser.parseAssetFile(file.path);
-    return data?.durationMs ?? 0;
+    if (type != KioAssetType.motion && type != KioAssetType.face && type != KioAssetType.camera) return 0;
+    if (!file.path.toLowerCase().endsWith('.vmd')) return 0;
+    return compute(_durationForVmdBytes, await file.readAsBytes());
   }
 
   Future<void> _repairAssetMetadata() async {
     var changed = false;
     final nextAssets = <KioAsset>[];
     for (final asset in _state.assets) {
-      if ((asset.type == KioAssetType.motion || asset.type == KioAssetType.camera) &&
+      if ((asset.type == KioAssetType.motion || asset.type == KioAssetType.face || asset.type == KioAssetType.camera) &&
           asset.durationMs == 0 &&
           asset.localPath.toLowerCase().endsWith('.vmd') &&
           File(asset.localPath).existsSync()) {
@@ -362,9 +368,12 @@ class KioStore extends ChangeNotifier {
   int _timelineDuration(ProjectSettings settings, {bool includeCurrentDuration = true}) {
     var duration = includeCurrentDuration ? settings.duration : 0;
     duration = mathMax(duration, assetById(settings.motionAssetId)?.durationMs ?? 0);
+    duration = mathMax(duration, assetById(settings.faceAssetId)?.durationMs ?? 0);
     duration = mathMax(duration, assetById(settings.cameraAssetId)?.durationMs ?? 0);
     return duration;
   }
 }
 
 int mathMax(int a, int b) => a > b ? a : b;
+
+int _durationForVmdBytes(Uint8List bytes) => VmdParser.parseBytes(bytes).durationMs;
