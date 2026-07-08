@@ -21,9 +21,10 @@ class AssetImportException implements Exception {
 }
 
 class AssetImportResult {
-  AssetImportResult({required this.asset, required this.isDuplicate});
+  AssetImportResult({required this.asset, required this.isDuplicate, this.repaired = false});
   final KioAsset asset;
   final bool isDuplicate;
+  final bool repaired;
 }
 
 class KioStore extends ChangeNotifier {
@@ -97,6 +98,16 @@ class KioStore extends ChangeNotifier {
       final checksum = await _sha256ForFile(source);
       final duplicate = _firstAsset((a) => a.type == type && a.sha256 == checksum);
       if (duplicate != null) {
+        if (type == KioAssetType.model) {
+          final repaired = await _refreshModelZipAsset(duplicate, source);
+          if (repaired != duplicate) {
+            _state = _state.copyWith(
+              assets: _state.assets.map((asset) => asset.id == repaired.id ? repaired : asset).toList(),
+            );
+            await save();
+            return AssetImportResult(asset: repaired, isDuplicate: true, repaired: true);
+          }
+        }
         return AssetImportResult(asset: duplicate, isDuplicate: true);
       }
 
@@ -244,27 +255,8 @@ class KioStore extends ChangeNotifier {
       throw AssetImportException('Model import only supports ZIP packages.');
     }
 
-    late final Archive archive;
-    try {
-      archive = ZipDecoder().decodeBytes(await source.readAsBytes(), verify: true);
-    } catch (_) {
-      throw AssetImportException('Invalid ZIP package.');
-    }
-
-    final files = archive.files.where((e) => e.isFile).toList();
-    final modelFiles = files.where((e) {
-      final n = e.name.toLowerCase();
-      return n.endsWith('.pmx') || n.endsWith('.pmd');
-    }).toList();
-    modelFiles.sort((a, b) {
-      final priority = _modelPriority(a.name).compareTo(_modelPriority(b.name));
-      if (priority != 0) return priority;
-      return a.name.length.compareTo(b.name.length);
-    });
-
-    if (modelFiles.isEmpty) {
-      throw AssetImportException('Model ZIP must contain at least one PMX or PMD file.');
-    }
+    final archive = await _readModelArchive(source);
+    final modelFiles = _modelFilesInArchive(archive);
 
     final root = await _assetRoot(KioAssetType.model);
     await root.create(recursive: true);
@@ -272,15 +264,7 @@ class KioStore extends ChangeNotifier {
     final targetDir = Directory(p.join(root.path, folder));
     if (targetDir.existsSync()) await targetDir.delete(recursive: true);
     await targetDir.create(recursive: true);
-
-    for (final entry in files) {
-      final relative = _safeRelativePath(entry.name);
-      if (relative == null) continue;
-      final out = File(p.join(targetDir.path, relative));
-      await out.parent.create(recursive: true);
-      final content = entry.content;
-      if (content is List<int>) await out.writeAsBytes(content);
-    }
+    await _extractModelArchive(archive, targetDir);
 
     return KioAsset(
       id: _uuid.v4(),
@@ -293,6 +277,54 @@ class KioStore extends ChangeNotifier {
       durationMs: 0,
       entryFile: _safeRelativePath(modelFiles.first.name),
     );
+  }
+
+  Future<KioAsset> _refreshModelZipAsset(KioAsset asset, File source) async {
+    final archive = await _readModelArchive(source);
+    final modelFiles = _modelFilesInArchive(archive);
+    final targetDir = Directory(asset.localPath);
+    if (targetDir.existsSync()) await targetDir.delete(recursive: true);
+    await targetDir.create(recursive: true);
+    await _extractModelArchive(archive, targetDir);
+    return asset.copyWith(entryFile: _safeRelativePath(modelFiles.first.name));
+  }
+
+  Future<Archive> _readModelArchive(File source) async {
+    try {
+      return ZipDecoder().decodeBytes(await source.readAsBytes(), verify: true);
+    } catch (_) {
+      throw AssetImportException('Invalid ZIP package.');
+    }
+  }
+
+  List<ArchiveFile> _modelFilesInArchive(Archive archive) {
+    final modelFiles = archive.files.where((e) {
+      if (!e.isFile) return false;
+      final n = e.name.toLowerCase();
+      return n.endsWith('.pmx') || n.endsWith('.pmd');
+    }).toList();
+    modelFiles.sort((a, b) {
+      final priority = _modelPriority(a.name).compareTo(_modelPriority(b.name));
+      if (priority != 0) return priority;
+      return a.name.length.compareTo(b.name.length);
+    });
+
+    if (modelFiles.isEmpty) {
+      throw AssetImportException('Model ZIP must contain at least one PMX or PMD file.');
+    }
+    return modelFiles;
+  }
+
+  Future<void> _extractModelArchive(Archive archive, Directory targetDir) async {
+    final files = archive.files.where((e) => e.isFile).toList();
+    for (final entry in files) {
+      final relative = _safeRelativePath(entry.name);
+      if (relative == null) continue;
+      final out = File(p.join(targetDir.path, relative));
+      await out.parent.create(recursive: true);
+      final content = entry.content;
+      if (content is List<int>) await out.writeAsBytes(content);
+    }
   }
 
   Future<void> _updateSelectedProject(KioProject project) async {
@@ -321,7 +353,7 @@ class KioStore extends ChangeNotifier {
   }
 
   String _safeFileName(String name) {
-    final out = p.basename(name).replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final out = p.basename(name).replaceAll(RegExp(r'[\x00-\x1F\x7F/\\:*?"<>|]'), '_').trim();
     return out.isEmpty ? 'asset' : out;
   }
 

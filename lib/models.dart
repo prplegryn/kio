@@ -67,7 +67,7 @@ class KioAsset {
   final int durationMs;
   final String? entryFile;
 
-  KioAsset copyWith({String? displayName, int? durationMs}) {
+  KioAsset copyWith({String? displayName, int? durationMs, Object? entryFile = _sentinel}) {
     return KioAsset(
       id: id,
       type: type,
@@ -77,7 +77,7 @@ class KioAsset {
       sha256: sha256,
       importedAt: importedAt,
       durationMs: durationMs ?? this.durationMs,
-      entryFile: entryFile,
+      entryFile: entryFile == _sentinel ? this.entryFile : entryFile as String?,
     );
   }
 

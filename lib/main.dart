@@ -216,7 +216,9 @@ class _KioWorkspaceState extends State<KioWorkspace> {
       final result = await store.importAssetToLibrary(type);
       if (!mounted || result == null) return;
       _logDebug(
-        result.isDuplicate
+        result.repaired
+            ? 'Import ${type.label}: duplicate refreshed ${result.asset.displayName} path=${result.asset.localPath} entry=${result.asset.entryFile ?? '-'}'
+            : result.isDuplicate
             ? 'Import ${type.label}: duplicate ${result.asset.displayName} path=${result.asset.localPath}'
             : 'Import ${type.label}: imported ${result.asset.displayName} path=${result.asset.localPath} duration=${result.asset.durationMs}ms',
       );
