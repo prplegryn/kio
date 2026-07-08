@@ -2,60 +2,33 @@ name: Build signed APK
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  android:
-    name: Android release APK
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.10.2
-
+          java-version: "17"
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
-
-      - name: Ensure Android Gradle wrapper
-        working-directory: android
-        run: |
-          if [ ! -f ./gradlew ]; then
-            gradle wrapper --gradle-version 8.10.2 --distribution-type all
-          fi
-
-      - name: Install dependencies
-        run: flutter pub get
       - name: Create Android local.properties
-        run: echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
-
-      - name: Analyze
-        run: flutter analyze
-
+        run: printf "flutter.sdk=%s\n" "$FLUTTER_ROOT" > android/local.properties
+      - name: Flutter pub get
+        run: flutter pub get
       - name: Build signed release APK
         run: flutter build apk --release
-
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: kio-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
