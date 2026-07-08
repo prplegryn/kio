@@ -156,8 +156,7 @@ class _PmxPreviewState extends State<PmxPreview> {
 
   Future<Map<String, ui.Image>> _loadTextures(KioAsset asset, _PmxPayload payload, PmxMesh mesh) async {
     final textureNames = mesh.materials
-        .map((material) => material.texturePath)
-        .whereType<String>()
+        .expand((material) => material.allTexturePaths)
         .where((path) => path.trim().isNotEmpty)
         .toSet()
         .toList();
@@ -414,12 +413,47 @@ class PmxMesh {
 }
 
 class MmdMaterial {
-  const MmdMaterial({required this.colorValue, required this.indexStart, required this.indexCount, this.texturePath});
+  const MmdMaterial({
+    required this.colorValue,
+    required this.indexStart,
+    required this.indexCount,
+    this.texturePath,
+    this.sphereTexturePath,
+    this.sphereMode = 0,
+    this.toonTexturePath,
+  });
 
   final int colorValue;
   final int indexStart;
   final int indexCount;
   final String? texturePath;
+  final String? sphereTexturePath;
+  final int sphereMode;
+  final String? toonTexturePath;
+
+  double get alpha => ((colorValue >> 24) & 0xFF) / 255.0;
+
+  bool get isTransparent => alpha < 0.98;
+
+  String? get displayTexturePath =>
+      texturePath ?? (sphereMode > 0 ? sphereTexturePath : null) ?? toonTexturePath;
+
+  Iterable<String> get allTexturePaths sync* {
+    final primary = texturePath;
+    if (primary != null && primary.trim().isNotEmpty) {
+      yield primary;
+    }
+
+    final sphere = sphereTexturePath;
+    if (sphereMode > 0 && sphere != null && sphere.trim().isNotEmpty) {
+      yield sphere;
+    }
+
+    final toon = toonTexturePath;
+    if (toon != null && toon.trim().isNotEmpty) {
+      yield toon;
+    }
+  }
 }
 
 class MmdVertex {
@@ -652,21 +686,34 @@ class PmxParser {
     r.skipFloat32(4);
     r.skipFloat32(1);
     final textureIndex = r.readIndex(textureIndexSize, signed: true);
-    r.skipIndex(textureIndexSize);
+  final sphereTextureIndex = r.readIndex(textureIndexSize, signed: true);
+  final sphereMode = r.readUint8();
+
+  final toonFlag = r.readUint8();
+  var toonTextureIndex = -1;
+  if (toonFlag == 0) {
+    toonTextureIndex = r.readIndex(textureIndexSize, signed: true);
+  } else {
+    // Built-in toon texture number. It is not an external file path.
     r.readUint8();
-    final toonFlag = r.readUint8();
-    if (toonFlag == 0) {
-      r.skipIndex(textureIndexSize);
-    } else {
-      r.skip(1);
-    }
+  }
     r.readText(textEncoding);
     final indexCount = r.readInt32();
     return MmdMaterial(
       colorValue: _materialColorValue(red, green, blue, alpha),
       indexStart: indexStart,
       indexCount: indexCount,
-      texturePath: textureIndex >= 0 && textureIndex < texturePaths.length ? texturePaths[textureIndex] : null,
+      texturePath: textureIndex >= 0 && textureIndex < texturePaths.length
+        ? texturePaths[textureIndex]
+        : null,
+    sphereTexturePath:
+        sphereTextureIndex >= 0 && sphereTextureIndex < texturePaths.length
+            ? texturePaths[sphereTextureIndex]
+            : null,
+    sphereMode: sphereMode,
+    toonTexturePath: toonTextureIndex >= 0 && toonTextureIndex < texturePaths.length
+        ? texturePaths[toonTextureIndex]
+        : null,
     );
   }
 
@@ -1085,7 +1132,7 @@ class PmxMeshPainter extends CustomPainter {
       final end = (material.indexStart + material.indexCount).clamp(start, mesh.indices.length).toInt();
       if (end - start < 3) continue;
 
-      final image = material.texturePath == null ? null : textures[material.texturePath!];
+      final image = material.displayTexturePath == null ? null : textures[material.displayTexturePath!];
       _drawMaterial(canvas, projected, material, start, end, image);
     }
   }
